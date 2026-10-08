@@ -1,0 +1,26 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.sln
+*.sln.docstates
+
+# Environment / secrets
+appsettings.Development.json
+
+# IDE
+.vs/
+.idea/
+.vscode/
+
+# Build artifacts
+*.dll
+*.exe
+*.pdb
+*.cache
+*.nuget
+
+# Coverage
+coverage/
+*.html
