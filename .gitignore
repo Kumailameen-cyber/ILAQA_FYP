@@ -1,0 +1,19 @@
+# Visual Studio
+.vs/
+**/bin/
+**/obj/
+*.user
+*.suo
+
+# Secrets
+.env
+.env.*
+!.env.example
+**/secrets.json
+**/appsettings.Development.json
+
+# Frontend (for later)
+node_modules/
+.expo/
+dist/
+build/
