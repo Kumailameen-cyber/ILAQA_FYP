@@ -91,13 +91,29 @@ namespace ILAQA.Controllers
 
             await using var transaction =
                 await _context.Database.BeginTransactionAsync();
+            // Lock this user's database row during login
+            var lockedUser = await _context.Users
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"AspNetUsers\" WHERE \"Id\" = {user.Id} FOR UPDATE")
+                .SingleOrDefaultAsync();
 
+            if (lockedUser == null)
+            {
+                return Unauthorized(new
+                {
+                    message = "User account not found."
+                });
+            }
+            // Reload the latest user data while holding the database lock
+            await _context.Entry(lockedUser).ReloadAsync();
 
-            // Generate a new session ID for this login
-            user.ActiveSessionId = Guid.NewGuid();
+            // Generate a new session ID for the locked user
+            lockedUser.ActiveSessionId = Guid.NewGuid();
 
             // Save the new session ID in PostgreSQL
-            var updateResult = await _userManager.UpdateAsync(user);
+            var updateResult = await _userManager.UpdateAsync(lockedUser);
+
+           
 
             if (!updateResult.Succeeded)
             {
@@ -118,8 +134,8 @@ namespace ILAQA.Controllers
 
 
 
-            // Generate JWT access token
-            var token = _jwtService.GenerateToken(user);
+            // Generate JWT access token using the new session
+            var token = _jwtService.GenerateToken(lockedUser);
 
             // Generate a new refresh token
             var refreshToken = _jwtService.GenerateRefreshToken();
@@ -130,7 +146,7 @@ namespace ILAQA.Controllers
 
             // Revoke previous refresh tokens for this runner
             var oldTokens = await _context.RefreshTokens
-                .Where(t => t.UserId == user.Id && t.RevokedAt == null)
+                .Where(t => t.UserId == lockedUser.Id && t.RevokedAt == null)
                 .ToListAsync();
 
             foreach (var oldToken in oldTokens)
@@ -141,8 +157,8 @@ namespace ILAQA.Controllers
             // Create a new refresh token database record
             var refreshTokenRecord = new RefreshToken
             {
-                UserId = user.Id,
-                SessionId = user.ActiveSessionId.Value,
+                UserId = lockedUser.Id,
+                SessionId = lockedUser.ActiveSessionId.Value,
                 TokenHash = refreshTokenHash,
                 CreatedAt = DateTime.UtcNow,
                 ExpiresAt = DateTime.UtcNow.AddDays(7)
@@ -165,9 +181,9 @@ namespace ILAQA.Controllers
                 expiresIn = 900,
                 user = new
                 {
-                    id = user.Id,
-                    username = user.UserName,
-                    displayName = user.DisplayName
+                    id = lockedUser.Id,
+                    username = lockedUser.UserName,
+                    displayName = lockedUser.DisplayName
                 }
             });
 
