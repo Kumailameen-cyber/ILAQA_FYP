@@ -118,10 +118,11 @@ builder.Services
         };
 
     });
-
+builder.Services.AddScoped<OtpService>();
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<JwtService>();
-
+builder.Services.AddScoped<EmailService>();
+builder.Services.AddHostedService<PendingRegistrationCleanupService>();
 // Add services to the container.
 
 builder.Services.AddControllers();
