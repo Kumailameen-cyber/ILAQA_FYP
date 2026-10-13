@@ -12,6 +12,9 @@ import RegisterScreen from './screens/RegisterScreen';
 import LoginScreen from './screens/LoginScreen';
 import HomeScreen from './screens/HomeScreen';
 import VerifyEmailScreen from './screens/VerifyEmailScreen';
+import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
+import VerifyResetOtpScreen from './screens/VerifyResetOtpScreen';
+import NewPasswordScreen from './screens/NewPasswordScreen';
 const API_URL = 'http://192.168.100.232:5246';
 
 type Runner = {
@@ -20,13 +23,22 @@ type Runner = {
   displayName: string;
 };
 
-type Screen = 'register' | 'login' | 'home'| 'verifyEmail';
+type Screen =
+  | 'register'
+  | 'login'
+  | 'home'
+  | 'verifyEmail'
+  | 'forgotPassword'
+  | 'verifyResetOtp'
+  | 'newPassword';
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>('register');
+  const [screen, setScreen] = useState<Screen>('login');
   const [runner, setRunner] = useState<Runner | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
 const [verificationEmail, setVerificationEmail] = useState('');
+const [resetEmail, setResetEmail] = useState('');
+const [resetCode, setResetCode] = useState('');
   useEffect(() => {
     const restoreSession = async () => {
       try {
@@ -37,22 +49,51 @@ const [verificationEmail, setVerificationEmail] = useState('');
 
         // Verify the saved session with the backend.
         // A saved token alone does not prove the session is valid.
-        const response = await fetch(
-          `${API_URL}/api/auth/refresh`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ refreshToken }),
-          }
-        );
+       
+const requestRefresh = () =>
+  fetch(`${API_URL}/api/auth/refresh`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ refreshToken }),
+  });
 
-        if (!response.ok) {
-          await SecureStore.deleteItemAsync('accessToken');
-          await SecureStore.deleteItemAsync('refreshToken');
-          return;
-        }
+let response = await requestRefresh();
+
+if (response.status === 429 || response.status >= 500) {
+  console.log('Temporary refresh failure. Retrying once...');
+
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 5000);
+  });
+
+  response = await requestRefresh();
+}
+
+        
+if (response.status === 429) {
+  console.log(
+    'Session refresh rate-limited. Saved tokens preserved.'
+  );
+  return;
+}
+
+
+if (!response.ok) {
+  if (response.status === 400 || response.status === 401) {
+    await SecureStore.deleteItemAsync('accessToken');
+    await SecureStore.deleteItemAsync('refreshToken');
+  } else {
+    console.log(
+      'Temporary session refresh failure. Saved tokens preserved.'
+    );
+  }
+
+  return;
+}
+
+
 
         const data = await response.json();
 
@@ -189,21 +230,120 @@ if (screen === 'verifyEmail') {
         setScreen('login');
       }}
       onBackToLogin={() => setScreen('login')}
+      onRegisterAgain={() => {
+        setVerificationEmail('');
+        setScreen('register');
+      }}
     />
   );
 }
-  if (screen === 'login') {
-    return (
-      <LoginScreen
-        onGoToRegister={() => setScreen('register')}
-        onLoginSuccess={handleLoginSuccess}
-        onVerifyEmail={(email) => {
-    setVerificationEmail(email);
-    setScreen('verifyEmail');
-  }}
-      />
+
+if (screen === 'forgotPassword') {
+  return (
+    <ForgotPasswordScreen
+      onOtpRequested={(email) => {
+        setResetEmail(email);
+        setResetCode('');
+        setScreen('verifyResetOtp');
+      }}
+      onBackToLogin={() => {
+        setResetEmail('');
+        setResetCode('');
+        setScreen('login');
+      }}
+    />
+  );
+}
+
+if (screen === 'verifyResetOtp') {
+  return (
+    <VerifyResetOtpScreen
+      email={resetEmail}
+      onVerified={(code) => {
+        setResetCode(code);
+        setScreen('newPassword');
+      }}
+      onBack={() => {
+        setResetCode('');
+        setScreen('forgotPassword');
+      }}
+    />
+  );
+}
+
+
+
+
+if (screen === 'newPassword') {
+  return (
+    <NewPasswordScreen
+      email={resetEmail}
+      code={resetCode}
+      onResetSuccess={() => {
+        setResetEmail('');
+        setResetCode('');
+        setScreen('login');
+      }}
+      onBack={async () => {
+        const response = await fetch(
+          `${API_URL}/api/auth/cancel-password-reset`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              email: resetEmail,
+              code: resetCode,
+            }),
+          }
+        );
+
+       
+if (!response.ok) {
+  const data = await response.json().catch(() => null);
+
+  if (response.status === 429) {
+    throw new Error(
+      'Too many requests. Please wait a minute before trying again.'
     );
   }
+
+  throw new Error(
+    data?.message || 'Password reset cancellation failed.'
+  );
+}
+
+
+        setResetEmail('');
+        setResetCode('');
+        setScreen('login');
+      }}
+    />
+  );
+}
+
+
+
+
+
+if (screen === 'login') {
+  return (
+    <LoginScreen
+      onGoToRegister={() => setScreen('register')}
+      onLoginSuccess={handleLoginSuccess}
+      onForgotPassword={() => {
+        setResetEmail('');
+        setResetCode('');
+        setScreen('forgotPassword');
+      }}
+      onVerifyEmail={(email) => {
+        setVerificationEmail(email);
+        setScreen('verifyEmail');
+      }}
+    />
+  );
+}
 
  
   return (

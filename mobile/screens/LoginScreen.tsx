@@ -25,12 +25,14 @@ type LoginScreenProps = {
   onGoToRegister: () => void;
   onLoginSuccess: (runner: Runner) => void;
   onVerifyEmail: (email: string) => void;
+   onForgotPassword: () => void;
 };
 
 export default function LoginScreen({
   onGoToRegister,
   onLoginSuccess,
   onVerifyEmail,
+  onForgotPassword,
 }: LoginScreenProps) {
   const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -84,8 +86,13 @@ export default function LoginScreen({
         }
       );
 
-      const data = await response.json();
-
+      const data = await response.json().catch(() => null);
+if (response.status === 429) {
+  setError(
+    'Too many attempts. Please wait a minute before trying again.'
+  );
+  return;
+}
       // ACCOUNT EXISTS BUT EMAIL IS NOT VERIFIED
       if (!response.ok) {
         if (
@@ -184,17 +191,31 @@ const handleVerifyEmail = async () => {
       }
     );
 
-    const data = await response.json();
+    
+const data = await response.json().catch(() => null);
 
-    // A recent OTP may already have been sent.
-    // The backend enforces a 60-second cooldown.
-    if (!response.ok && response.status !== 429) {
-      setError(
-        data.message ||
-          'Unable to send verification code.'
-      );
-      return;
-    }
+// Distinguish the OTP cooldown from the API rate limit.
+if (response.status === 429) {
+  if (data?.message?.includes('wait 60 seconds')) {
+    // OTP was already sent recently. Use the existing code.
+    setPassword('');
+    setShowPassword(false);
+    onVerifyEmail(verificationEmail);
+    return;
+  }
+
+  setError(
+    'Too many requests. Please wait a minute before trying again.'
+  );
+  return;
+}
+
+if (!response.ok) {
+  setError(
+    data?.message || 'Unable to send verification code.'
+  );
+  return;
+}
 
     setPassword('');
     setShowPassword(false);
@@ -252,6 +273,7 @@ const handleVerifyEmail = async () => {
           }}
         />
 
+       
         {/* PASSWORD */}
 
         <Text style={styles.label}>
@@ -276,14 +298,10 @@ const handleVerifyEmail = async () => {
 
           <TouchableOpacity
             style={styles.eyeButton}
-            onPress={() =>
-              setShowPassword(!showPassword)
-            }
+            onPress={() => setShowPassword(!showPassword)}
             accessibilityRole="button"
             accessibilityLabel={
-              showPassword
-                ? 'Hide password'
-                : 'Show password'
+              showPassword ? 'Hide password' : 'Show password'
             }
           >
             <Text style={styles.eyeText}>
@@ -291,6 +309,17 @@ const handleVerifyEmail = async () => {
             </Text>
           </TouchableOpacity>
         </View>
+
+        {/* FORGOT PASSWORD LINK - ADD HERE */}
+        <TouchableOpacity
+          style={styles.forgotPasswordButton}
+          onPress={onForgotPassword}
+          disabled={loading}
+        >
+          <Text style={styles.forgotPasswordText}>
+            Forgot Password?
+          </Text>
+        </TouchableOpacity>
 
         {/* INLINE ERROR MESSAGE */}
 
@@ -301,6 +330,7 @@ const handleVerifyEmail = async () => {
             </Text>
           </View>
         ) : null}
+
 
         {/* EMAIL VERIFICATION REQUIRED */}
 
@@ -540,6 +570,19 @@ const styles = StyleSheet.create({
   disabled: {
     opacity: 0.6,
   },
+
+  forgotPasswordButton: {
+  alignSelf: 'flex-end',
+  marginTop: -8,
+  marginBottom: 24,
+  paddingVertical: 8,
+},
+
+forgotPasswordText: {
+  color: '#C6FF35',
+  fontSize: 13,
+  fontWeight: '700',
+},
 
   buttonText: {
     color: '#101310',

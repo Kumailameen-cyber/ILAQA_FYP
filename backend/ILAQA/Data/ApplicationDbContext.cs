@@ -21,6 +21,7 @@ namespace ILAQA.Data
 
         public DbSet<PendingRegistration> PendingRegistrations
         { get; set; }
+        public DbSet<PasswordResetOtp> PasswordResetOtps { get; set; }
 
         protected override void OnModelCreating(
             ModelBuilder builder)
@@ -41,6 +42,21 @@ namespace ILAQA.Data
                 // Faster cleanup of expired registrations.
                 entity.HasIndex(p => p.ExpiresAt);
             });
+
+
+            builder.Entity<PasswordResetOtp>(entity =>
+            {
+                // One active reset record per runner.
+                entity.HasIndex(x => x.UserId)
+                      .IsUnique();
+
+                // Link reset OTP to the permanent Identity user.
+                entity.HasOne(x => x.User)
+                      .WithMany()
+                      .HasForeignKey(x => x.UserId)
+                      .OnDelete(DeleteBehavior.Cascade);
+            });
+
         }
     }
 }
