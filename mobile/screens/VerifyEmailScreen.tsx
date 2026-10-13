@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState,useEffect  } from 'react';
 import {
   View,
   Text,
@@ -33,6 +33,20 @@ export default function VerifyEmailScreen({
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 const [registrationExpired, setRegistrationExpired] = useState(false);
+const [resendCountdown, setResendCountdown] = useState(60);
+
+
+useEffect(() => {
+  if (resendCountdown <= 0) return;
+
+  const timer = setTimeout(() => {
+    setResendCountdown((previous) =>
+      Math.max(0, previous - 1)
+    );
+  }, 1000);
+
+  return () => clearTimeout(timer);
+}, [resendCountdown]);
 
 const checkRegistrationExpired = (
   status: number,
@@ -82,18 +96,29 @@ const checkRegistrationExpired = (
         }
       );
 
-      const data = await response.json();
+     
+const data = await response.json().catch(() => null);
 
-      if (!response.ok) {
-        if (checkRegistrationExpired(response.status, data.message)) {
+if (response.status === 429) {
+  setError(
+    data?.message ||
+      'Too many requests. Please wait a minute before trying again.'
+  );
+  return;
+}
+
+if (!response.ok) {
+  if (checkRegistrationExpired(response.status, data?.message)) {
     return;
   }
-        setError(
-          data.message ||
-            'Verification failed. Check your code.'
-        );
-        return;
-      }
+
+  setError(
+    data?.message ||
+      'Verification failed. Check your code.'
+  );
+  return;
+}
+
 
       onVerified();
     } catch {
@@ -106,11 +131,11 @@ const checkRegistrationExpired = (
   };
 
   const handleResend = async () => {
-    if (resending) return;
+    if (resending || loading || resendCountdown > 0) return;
 
-    setResending(true);
-    setError('');
-    setMessage('');
+    setCode('');
+    setResendCountdown(60);
+    setMessage('If verification is required, a new code will be sent. Check your inbox.');
 
     try {
       const response = await fetch(
@@ -124,17 +149,29 @@ const checkRegistrationExpired = (
         }
       );
 
-      const data = await response.json();
+      
+     
+const data = await response.json().catch(() => null);
 
-      if (!response.ok) {
-        if (checkRegistrationExpired(response.status, data.message)) {
+if (response.status === 429) {
+  setError(
+    data?.message ||
+      'Too many requests. Please wait a minute before trying again.'
+  );
+  return;
+}
+
+if (!response.ok) {
+  if (checkRegistrationExpired(response.status, data?.message)) {
     return;
   }
-        setError(
-          data.message || 'Unable to resend code.'
-        );
-        return;
-      }
+
+  setError(
+    data?.message || 'Unable to resend code.'
+  );
+  return;
+}
+
 
       setCode('');
       setMessage(
@@ -222,7 +259,7 @@ return (
           />
 
           <Text style={styles.hint}>
-            Your code expires after 10 minutes.
+            Your code expires after 60 seconds.
           </Text>
 
           {error ? (
@@ -250,17 +287,25 @@ return (
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.resendButton}
-            onPress={handleResend}
-            disabled={resending}
-          >
-            <Text style={styles.resendText}>
-              {resending
-                ? 'SENDING...'
-                : "DIDN'T RECEIVE THE CODE? RESEND"}
-            </Text>
-          </TouchableOpacity>
+         
+<TouchableOpacity
+  style={[
+    styles.resendButton,
+    (loading || resending || resendCountdown > 0) &&
+      styles.disabled,
+  ]}
+  onPress={handleResend}
+  disabled={loading || resending || resendCountdown > 0}
+>
+  <Text style={styles.resendText}>
+    {resending
+      ? 'SENDING...'
+      : resendCountdown > 0
+        ? `RESEND CODE IN ${resendCountdown}s`
+        : "DIDN'T RECEIVE THE CODE? RESEND"}
+  </Text>
+</TouchableOpacity>
+
 
           <TouchableOpacity onPress={onBackToLogin}>
             <Text style={styles.backText}>

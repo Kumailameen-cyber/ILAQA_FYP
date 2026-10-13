@@ -6,10 +6,12 @@ using Microsoft.AspNetCore.Mvc;
 using ILAQA.Services;
 using ILAQA.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
 namespace ILAQA.Controllers
 {
     [Route("api/auth")]
     [ApiController]
+    [EnableRateLimiting("auth")]
     public class AuthController : ControllerBase
     {
         private readonly IPasswordHasher<ApplicationUser> _passwordHasher;
@@ -130,7 +132,7 @@ namespace ILAQA.Controllers
                     "ILAQA - Verify Your Email",
                     $"Welcome to ILAQA!\n\n" +
                     $"Your verification code is: {otp}\n\n" +
-                    "This code expires in 10 minutes.\n\n" +
+                    "This code expires in 60 seconds.\n\n" +
                     "If you didn't register, ignore this email."
                 );
             }
@@ -543,13 +545,16 @@ namespace ILAQA.Controllers
                 .SingleOrDefaultAsync();
 
             // Do not reveal whether the email exists.
-            if (pending == null)
+
+            if (pending == null || pending.ExpiresAt <= now)
             {
-                return Ok(new
+                return StatusCode(410, new
                 {
-                    message = "If this email requires verification, a code will be sent."
+                    message = "Registration expired or unavailable. Please register again.",
+                    registrationExpired = true
                 });
             }
+
 
             // Registration is valid for 24 hours.
             if (pending.ExpiresAt <= now)
@@ -780,6 +785,355 @@ namespace ILAQA.Controllers
                 message = "Logged out successfully."
             });
         }
+
+        [HttpPost("forgot-password")]
+        public async Task<IActionResult> ForgotPassword(
+            [FromBody] ForgotPasswordRequest request)
+        {
+            var email = request.Email.Trim().ToLowerInvariant();
+            var now = DateTime.UtcNow;
+
+            const string successMessage =
+                "If an eligible account exists, a password reset code will be sent.";
+
+            // Only permanent, verified accounts can reset passwords.
+            var user = await _userManager.FindByEmailAsync(email);
+
+            if (user == null || !user.EmailConfirmed)
+            {
+                return Ok(new { message = successMessage });
+            }
+
+            await using var transaction =
+                await _context.Database.BeginTransactionAsync();
+
+            await _context.Users
+      .FromSqlInterpolated(
+          $"SELECT * FROM \"AspNetUsers\" WHERE \"Id\" = {user.Id} FOR UPDATE")
+      .SingleAsync();
+            var reset = await _context.PasswordResetOtps
+                .SingleOrDefaultAsync(x => x.UserId == user.Id);
+
+            // Enforce 60-second resend cooldown.
+
+            if (reset != null &&
+                reset.UsedAt == null &&
+                reset.ExpiresAt > now &&
+                reset.FailedAttempts < 5 &&
+                reset.LastOtpSentAt.HasValue &&
+                reset.LastOtpSentAt.Value.AddSeconds(60) > now)
+
+            {
+                await transaction.CommitAsync();
+
+                return Ok(new { message = successMessage });
+            }
+
+            var otp = _otpService.GenerateOtp();
+
+            if (reset == null)
+            {
+                reset = new PasswordResetOtp
+                {
+                    UserId = user.Id
+                };
+
+                _context.PasswordResetOtps.Add(reset);
+            }
+
+            // Use a purpose-specific identifier so registration
+            // and password-reset OTPs cannot be mixed.
+            reset.CodeHash = _otpService.HashOtp(
+                $"password-reset:{user.Id}", otp);
+
+            reset.CreatedAt = now;
+            reset.ExpiresAt = now.AddSeconds(60);
+            reset.FailedAttempts = 0;
+            reset.UsedAt = null;
+            reset.LastOtpSentAt = now;
+
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            try
+            {
+                await _emailService.SendEmailAsync(
+                    email,
+                    "ILAQA - Password Reset Code",
+                    $"Your ILAQA password reset code is: {otp}\n\n" +
+                    "This code expires in 60 seconds.\n\n" +
+                    "If you did not request a password reset, " +
+                    "you can safely ignore this email."
+                );
+            }
+            catch (Exception)
+            {
+                // Avoid exposing account existence through
+                // different responses.
+                return Ok(new { message = successMessage });
+            }
+
+            return Ok(new { message = successMessage });
+        }
+
+
+        [HttpPost("verify-reset-otp")]
+        public async Task<IActionResult> VerifyResetOtp(
+            [FromBody] VerifyResetOtpRequest request)
+        {
+            var email = request.Email.Trim().ToLowerInvariant();
+            var now = DateTime.UtcNow;
+
+            var user = await _userManager.FindByEmailAsync(email);
+
+            if (user == null || !user.EmailConfirmed)
+            {
+                return BadRequest(new
+                {
+                    message = "Invalid or expired verification code."
+                });
+            }
+
+            await using var transaction =
+                await _context.Database.BeginTransactionAsync();
+
+            // Lock the reset record to prevent concurrent
+            // requests from bypassing the attempt counter.
+            var reset = await _context.PasswordResetOtps
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"PasswordResetOtps\" WHERE \"UserId\" = {user.Id} FOR UPDATE")
+                .SingleOrDefaultAsync();
+
+            if (reset == null ||
+                reset.ExpiresAt <= now ||
+                reset.UsedAt != null)
+            {
+                return BadRequest(new
+                {
+                    message = "Invalid or expired verification code."
+                });
+            }
+
+            if (reset.FailedAttempts >= 5)
+            {
+                return StatusCode(429, new
+                {
+                    message = "Too many incorrect attempts. Request a new code."
+                });
+            }
+
+            var valid = _otpService.VerifyOtp(
+                $"password-reset:{user.Id}",
+                request.Code,
+                reset.CodeHash);
+
+            if (!valid)
+            {
+                reset.FailedAttempts++;
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return BadRequest(new
+                {
+                    message = reset.FailedAttempts >= 5
+                        ? "Too many incorrect attempts. Request a new code."
+                        : "Incorrect verification code."
+                });
+            }
+
+            await transaction.CommitAsync();
+
+            return Ok(new
+            {
+                message = "Code verified successfully.",
+                verified = true
+            });
+        }
+
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword(
+            [FromBody] ResetPasswordRequest request)
+        {
+            var email = request.Email.Trim().ToLowerInvariant();
+
+            var user = await _userManager.FindByEmailAsync(email);
+
+            if (user == null || !user.EmailConfirmed)
+            {
+                return BadRequest(new
+                {
+                    message = "Invalid or expired verification code."
+                });
+            }
+
+            await using var transaction =
+                await _context.Database.BeginTransactionAsync();
+
+            // Lock the user first to prevent concurrent resets.
+            var lockedUser = await _context.Users
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"AspNetUsers\" WHERE \"Id\" = {user.Id} FOR UPDATE")
+                .SingleAsync();
+
+            // Lock the password-reset OTP record.
+            var reset = await _context.PasswordResetOtps
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"PasswordResetOtps\" WHERE \"UserId\" = {user.Id} FOR UPDATE")
+                .SingleOrDefaultAsync();
+
+            var now = DateTime.UtcNow;
+
+            if (reset == null ||
+                reset.ExpiresAt <= now ||
+                reset.UsedAt != null)
+            {
+                return BadRequest(new
+                {
+                    message = "Invalid or expired verification code."
+                });
+            }
+
+            if (reset.FailedAttempts >= 5)
+            {
+                return StatusCode(429, new
+                {
+                    message = "Too many incorrect attempts. Request a new code."
+                });
+            }
+
+            // Verify the OTP again before changing the password.
+            var valid = _otpService.VerifyOtp(
+                $"password-reset:{user.Id}",
+                request.Code,
+                reset.CodeHash);
+
+            if (!valid)
+            {
+                reset.FailedAttempts++;
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return BadRequest(new
+                {
+                    message = reset.FailedAttempts >= 5
+                        ? "Too many incorrect attempts. Request a new code."
+                        : "Incorrect verification code."
+                });
+            }
+
+            // Check the new password against Identity's rules.
+            foreach (var validator in _userManager.PasswordValidators)
+            {
+                var result = await validator.ValidateAsync(
+                    _userManager, lockedUser, request.NewPassword);
+
+                if (!result.Succeeded)
+                {
+                    return BadRequest(new
+                    {
+                        message = "New password does not meet security requirements.",
+                        errors = result.Errors.Select(e => e.Description)
+                    });
+                }
+            }
+
+            // Hash and save the new password using ASP.NET Identity.
+            var passwordHash = _userManager.PasswordHasher.HashPassword(
+                lockedUser, request.NewPassword);
+
+            lockedUser.PasswordHash = passwordHash;
+
+            // Invalidate all existing access-token sessions.
+            lockedUser.ActiveSessionId = null;
+
+            // Update the security stamp.
+            lockedUser.SecurityStamp = Guid.NewGuid().ToString();
+
+            // Revoke all existing refresh tokens.
+            await _context.RefreshTokens
+                .Where(x => x.UserId == lockedUser.Id && x.RevokedAt == null)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.RevokedAt, now));
+
+            // Mark OTP as used.
+            reset.UsedAt = now;
+
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return Ok(new
+            {
+                message = "Password reset successfully. Please sign in again."
+            });
+        }
+
+        [HttpPost("cancel-password-reset")]
+        public async Task<IActionResult> CancelPasswordReset(
+            [FromBody] CancelPasswordResetRequest request)
+        {
+            var email = request.Email.Trim();
+
+            var user = await _userManager.FindByEmailAsync(email);
+
+            if (user == null || !user.EmailConfirmed)
+            {
+                return Ok(new
+                {
+                    message = "Password reset cancelled."
+                });
+            }
+
+            await using var transaction =
+                await _context.Database.BeginTransactionAsync();
+
+            var reset = await _context.PasswordResetOtps
+                .FromSqlInterpolated($@"
+            SELECT * FROM ""PasswordResetOtps""
+            WHERE ""UserId"" = {user.Id}
+            FOR UPDATE")
+                .FirstOrDefaultAsync();
+
+            if (reset == null ||
+                reset.UsedAt != null ||
+                reset.ExpiresAt <= DateTime.UtcNow ||
+                reset.FailedAttempts >= 5)
+            {
+                return BadRequest(new
+                {
+                    message = "This reset code is invalid or expired."
+                });
+            }
+
+            var validCode = _otpService.VerifyOtp(
+                $"password-reset:{user.Id}",
+                request.Code,
+                reset.CodeHash
+            );
+
+            if (!validCode)
+            {
+                reset.FailedAttempts++;
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return BadRequest(new
+                {
+                    message = "This reset code is invalid or expired."
+                });
+            }
+
+            reset.UsedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return Ok(new
+            {
+                message = "Password reset cancelled."
+            });
+        }
+
 
 
     }
