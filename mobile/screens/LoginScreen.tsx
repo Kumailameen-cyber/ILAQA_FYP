@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import {
   View,
@@ -12,7 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
-
+import PasswordInput from '../components/PasswordInput';
+import AppPopup from '../components/AppPopup';
 const API_URL = 'http://192.168.100.232:5246';
 
 type Runner = {
@@ -38,10 +38,10 @@ export default function LoginScreen({
   const [password, setPassword] = useState('');
 
   const [loading, setLoading] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
+  
 
   const [error, setError] = useState('');
-
+  const [errorPopupVisible, setErrorPopupVisible] = useState(false);
   const [needsVerification, setNeedsVerification] =
     useState(false);
 
@@ -53,14 +53,17 @@ export default function LoginScreen({
     setVerificationEmail('');
     setError('');
   };
-
+const showLoginError = (message: string) => {
+  setError(message);
+  setErrorPopupVisible(true);
+};
   const handleLogin = async () => {
     if (loading) return;
 
     const identifier = emailOrUsername.trim();
 
     if (!identifier || !password) {
-      setError(
+      showLoginError(
         'Please enter your email or username and password.'
       );
       return;
@@ -88,7 +91,7 @@ export default function LoginScreen({
 
       const data = await response.json().catch(() => null);
 if (response.status === 429) {
-  setError(
+  showLoginError(
     'Too many attempts. Please wait a minute before trying again.'
   );
   return;
@@ -96,8 +99,8 @@ if (response.status === 429) {
       // ACCOUNT EXISTS BUT EMAIL IS NOT VERIFIED
       if (!response.ok) {
         if (
-          data.requiresEmailVerification === true &&
-          typeof data.email === 'string' &&
+          data?.requiresEmailVerification === true &&
+          typeof data?.email === 'string' &&
           data.email.length > 0
         ) {
           setVerificationEmail(data.email);
@@ -106,8 +109,8 @@ if (response.status === 429) {
           return;
         }
 
-        setError(
-          data.message ||
+        showLoginError(
+          data?.message ||
             'Invalid email, username, or password.'
         );
 
@@ -116,11 +119,11 @@ if (response.status === 429) {
 
       // CHECK LOGIN RESPONSE
       if (
-        !data.accessToken ||
-        !data.refreshToken ||
-        !data.user
+        !data?.accessToken ||
+        !data?.refreshToken ||
+        !data?.user
       ) {
-        setError(
+        showLoginError(
           'The server returned incomplete login details.'
         );
         return;
@@ -149,13 +152,13 @@ if (response.status === 429) {
       };
 
       setPassword('');
-      setShowPassword(false);
+      
       resetVerification();
 
       // OPEN HOME SCREEN
       onLoginSuccess(loggedInRunner);
     } catch {
-      setError(
+      showLoginError(
         'Unable to connect to the server. Check your connection and try again.'
       );
     } finally {
@@ -166,7 +169,7 @@ if (response.status === 429) {
  
 const handleVerifyEmail = async () => {
   if (!verificationEmail) {
-    setError(
+    showLoginError(
       'Verification email is missing. Please sign in again.'
     );
     return;
@@ -199,30 +202,29 @@ if (response.status === 429) {
   if (data?.message?.includes('wait 60 seconds')) {
     // OTP was already sent recently. Use the existing code.
     setPassword('');
-    setShowPassword(false);
-    onVerifyEmail(verificationEmail);
+   onVerifyEmail(verificationEmail);
     return;
   }
 
-  setError(
+  showLoginError(
     'Too many requests. Please wait a minute before trying again.'
   );
   return;
 }
 
 if (!response.ok) {
-  setError(
+  showLoginError(
     data?.message || 'Unable to send verification code.'
   );
   return;
 }
 
     setPassword('');
-    setShowPassword(false);
+    
 
     onVerifyEmail(verificationEmail);
   } catch {
-    setError(
+    showLoginError(
       'Unable to connect to the server. Try again.'
     );
   } finally {
@@ -280,35 +282,17 @@ if (!response.ok) {
           PASSWORD
         </Text>
 
-        <View style={styles.passwordContainer}>
-          <TextInput
-            style={styles.passwordInput}
-            placeholder="Enter your password"
-            placeholderTextColor="#777"
-            secureTextEntry={!showPassword}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="password"
-            value={password}
-            onChangeText={(value) => {
-              setPassword(value);
-              resetVerification();
-            }}
-          />
+        
+<PasswordInput
+  value={password}
+  onChangeText={(value) => {
+    setPassword(value);
+    resetVerification();
+  }}
+  placeholder="Enter your password"
+  autoComplete="password"
+/>
 
-          <TouchableOpacity
-            style={styles.eyeButton}
-            onPress={() => setShowPassword(!showPassword)}
-            accessibilityRole="button"
-            accessibilityLabel={
-              showPassword ? 'Hide password' : 'Show password'
-            }
-          >
-            <Text style={styles.eyeText}>
-              {showPassword ? 'HIDE' : 'SHOW'}
-            </Text>
-          </TouchableOpacity>
-        </View>
 
         {/* FORGOT PASSWORD LINK - ADD HERE */}
         <TouchableOpacity
@@ -320,16 +304,6 @@ if (!response.ok) {
             Forgot Password?
           </Text>
         </TouchableOpacity>
-
-        {/* INLINE ERROR MESSAGE */}
-
-        {error ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>
-              {error}
-            </Text>
-          </View>
-        ) : null}
 
 
         {/* EMAIL VERIFICATION REQUIRED */}
@@ -399,6 +373,14 @@ if (!response.ok) {
           </Text>
         </Text>
       </ScrollView>
+
+      <AppPopup
+        visible={errorPopupVisible}
+        type="error"
+        title="SIGN IN FAILED"
+        message={error}
+        onClose={() => setErrorPopupVisible(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -465,53 +447,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     fontSize: 15,
     marginBottom: 22,
-  },
-
-  passwordContainer: {
-    backgroundColor: '#1C1E1C',
-    borderWidth: 1,
-    borderColor: '#303330',
-    borderRadius: 8,
-    height: 54,
-    marginBottom: 22,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-
-  passwordInput: {
-    flex: 1,
-    color: '#FFFFFF',
-    paddingHorizontal: 16,
-    fontSize: 15,
-    height: '100%',
-  },
-
-  eyeButton: {
-    paddingHorizontal: 16,
-    height: '100%',
-    justifyContent: 'center',
-  },
-
-  eyeText: {
-    color: '#C6FF35',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-
-  errorBox: {
-    backgroundColor: '#291717',
-    borderColor: '#B64B4B',
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 14,
-    marginBottom: 18,
-  },
-
-  errorText: {
-    color: '#FF8585',
-    fontSize: 13,
-    lineHeight: 20,
   },
 
   verificationBox: {

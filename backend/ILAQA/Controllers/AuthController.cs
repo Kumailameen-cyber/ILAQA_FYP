@@ -1,12 +1,14 @@
 ﻿
+using ILAQA.Data;
 using ILAQA.DTOs;
 using ILAQA.Models;
+using ILAQA.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using ILAQA.Services;
-using ILAQA.Data;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
+using System.Text;
 namespace ILAQA.Controllers
 {
     [Route("api/auth")]
@@ -67,38 +69,58 @@ namespace ILAQA.Controllers
                 }
             }
 
-            // Check permanent accounts.
-            if (await _userManager.FindByEmailAsync(email) != null ||
-                await _userManager.FindByNameAsync(username) != null)
+            // Check usernames already used by permanent accounts.
+            var normalizedUsername = _userManager.NormalizeName(username);
+
+            var usernameExists = await _context.Users
+                .AnyAsync(u => u.NormalizedUserName == normalizedUsername);
+
+            if (usernameExists)
             {
-                return BadRequest(new
+                return Conflict(new
                 {
-                    message = "Email or username is already registered."
+                    message = "This username is already taken. Please choose another."
+                });
+            }
+
+            // Check emails already used by permanent accounts.
+            var normalizedEmail = _userManager.NormalizeEmail(email);
+
+            var emailExists = await _context.Users
+                .AnyAsync(u => u.NormalizedEmail == normalizedEmail);
+
+            if (emailExists)
+            {
+                return Conflict(new
+                {
+                    message = "This email is already registered."
                 });
             }
 
             // Check pending registrations.
             // Expired records will be removed by a cleanup worker later.
             var existingPending = await _context.PendingRegistrations
-                .AnyAsync(p =>
-                    (p.Email == email || p.Username == username) &&
-                    p.ExpiresAt > now);
+    .AnyAsync(p =>
+        (p.Email == email ||
+         p.Username.ToLower() == username.ToLower()) &&
+        p.ExpiresAt > now);
 
             if (existingPending)
             {
                 return Conflict(new
                 {
-                    message = "A registration is already pending for this email or username."
+                    message = "Username or email is already used"
                 });
             }
 
             // Remove expired pending registrations that would
             // otherwise block the unique database indexes.
             await _context.PendingRegistrations
-                .Where(p =>
-                    (p.Email == email || p.Username == username) &&
-                    p.ExpiresAt <= now)
-                .ExecuteDeleteAsync();
+    .Where(p =>
+        (p.Email == email ||
+         p.Username.ToLower() == username.ToLower()) &&
+        p.ExpiresAt <= now)
+    .ExecuteDeleteAsync();
 
             // Store only the Identity password hash.
             var passwordHash = _passwordHasher.HashPassword(
@@ -183,7 +205,7 @@ namespace ILAQA.Controllers
                     });
                 }
 
-                // OTP expires after 10 minutes or 5 failed attempts.
+                // OTP expires after 1 minutes or 5 failed attempts.
                 if (pending.OtpExpiresAt <= now ||
                     pending.FailedAttempts >= 5)
                 {
@@ -851,7 +873,9 @@ namespace ILAQA.Controllers
             reset.FailedAttempts = 0;
             reset.UsedAt = null;
             reset.LastOtpSentAt = now;
-
+            // Requesting a new OTP invalidates previous reset authorization.
+            reset.ResetTokenHash = null;
+            reset.ResetTokenExpiresAt = null;
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
@@ -897,8 +921,7 @@ namespace ILAQA.Controllers
             await using var transaction =
                 await _context.Database.BeginTransactionAsync();
 
-            // Lock the reset record to prevent concurrent
-            // requests from bypassing the attempt counter.
+            // Lock the record to prevent simultaneous verification.
             var reset = await _context.PasswordResetOtps
                 .FromSqlInterpolated(
                     $"SELECT * FROM \"PasswordResetOtps\" WHERE \"UserId\" = {user.Id} FOR UPDATE")
@@ -930,6 +953,7 @@ namespace ILAQA.Controllers
             if (!valid)
             {
                 reset.FailedAttempts++;
+
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
 
@@ -941,14 +965,33 @@ namespace ILAQA.Controllers
                 });
             }
 
+            // Generate a cryptographically secure 32-byte reset token.
+            var tokenBytes = RandomNumberGenerator.GetBytes(32);
+            var resetToken = Convert.ToHexString(tokenBytes);
+
+            // Store only the SHA-256 hash, never the raw token.
+            reset.ResetTokenHash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(resetToken)));
+
+            // Give the user 15 minutes to create a new password.
+            reset.ResetTokenExpiresAt = now.AddMinutes(15);
+
+            // The original OTP cannot be verified again.
+            reset.UsedAt = now;
+
+            await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
             return Ok(new
             {
                 message = "Code verified successfully.",
-                verified = true
+                verified = true,
+                resetToken,
+                expiresIn = 900
             });
         }
+
+
 
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword(
@@ -962,20 +1005,19 @@ namespace ILAQA.Controllers
             {
                 return BadRequest(new
                 {
-                    message = "Invalid or expired verification code."
+                    message = "Invalid or expired reset authorization."
                 });
             }
 
             await using var transaction =
                 await _context.Database.BeginTransactionAsync();
 
-            // Lock the user first to prevent concurrent resets.
+            // Lock user and reset record to prevent concurrent resets.
             var lockedUser = await _context.Users
                 .FromSqlInterpolated(
                     $"SELECT * FROM \"AspNetUsers\" WHERE \"Id\" = {user.Id} FOR UPDATE")
                 .SingleAsync();
 
-            // Lock the password-reset OTP record.
             var reset = await _context.PasswordResetOtps
                 .FromSqlInterpolated(
                     $"SELECT * FROM \"PasswordResetOtps\" WHERE \"UserId\" = {user.Id} FOR UPDATE")
@@ -983,45 +1025,42 @@ namespace ILAQA.Controllers
 
             var now = DateTime.UtcNow;
 
+            // The OTP expiry no longer matters after verification.
+            // Only the reset token's expiry matters here.
             if (reset == null ||
-                reset.ExpiresAt <= now ||
-                reset.UsedAt != null)
+                reset.ResetTokenHash == null ||
+                reset.ResetTokenExpiresAt == null ||
+                reset.ResetTokenExpiresAt <= now ||
+                reset.UsedAt == null)
             {
                 return BadRequest(new
                 {
-                    message = "Invalid or expired verification code."
+                    message = "Invalid or expired reset authorization."
                 });
             }
 
-            if (reset.FailedAttempts >= 5)
+            // Hash the token received from the mobile app.
+            var receivedTokenHash = Convert.ToHexString(
+                SHA256.HashData(
+                    Encoding.UTF8.GetBytes(request.ResetToken)));
+
+            // Compare hashes without a timing-based comparison.
+            var expectedHashBytes =
+                Convert.FromHexString(reset.ResetTokenHash);
+
+            var receivedHashBytes =
+                Convert.FromHexString(receivedTokenHash);
+
+            if (!CryptographicOperations.FixedTimeEquals(
+                expectedHashBytes, receivedHashBytes))
             {
-                return StatusCode(429, new
-                {
-                    message = "Too many incorrect attempts. Request a new code."
-                });
-            }
-
-            // Verify the OTP again before changing the password.
-            var valid = _otpService.VerifyOtp(
-                $"password-reset:{user.Id}",
-                request.Code,
-                reset.CodeHash);
-
-            if (!valid)
-            {
-                reset.FailedAttempts++;
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
-
                 return BadRequest(new
                 {
-                    message = reset.FailedAttempts >= 5
-                        ? "Too many incorrect attempts. Request a new code."
-                        : "Incorrect verification code."
+                    message = "Invalid or expired reset authorization."
                 });
             }
 
-            // Check the new password against Identity's rules.
+            // Validate new password using ASP.NET Core Identity rules.
             foreach (var validator in _userManager.PasswordValidators)
             {
                 var result = await validator.ValidateAsync(
@@ -1037,26 +1076,28 @@ namespace ILAQA.Controllers
                 }
             }
 
-            // Hash and save the new password using ASP.NET Identity.
-            var passwordHash = _userManager.PasswordHasher.HashPassword(
-                lockedUser, request.NewPassword);
+            // Hash and save the new password.
+            lockedUser.PasswordHash =
+                _userManager.PasswordHasher.HashPassword(
+                    lockedUser, request.NewPassword);
 
-            lockedUser.PasswordHash = passwordHash;
-
-            // Invalidate all existing access-token sessions.
+            // Invalidate existing access-token sessions.
             lockedUser.ActiveSessionId = null;
 
-            // Update the security stamp.
+            // Change the Identity security stamp.
             lockedUser.SecurityStamp = Guid.NewGuid().ToString();
 
-            // Revoke all existing refresh tokens.
+            // Revoke all active refresh tokens.
             await _context.RefreshTokens
-                .Where(x => x.UserId == lockedUser.Id && x.RevokedAt == null)
+                .Where(x =>
+                    x.UserId == lockedUser.Id &&
+                    x.RevokedAt == null)
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(x => x.RevokedAt, now));
 
-            // Mark OTP as used.
-            reset.UsedAt = now;
+            // Consume the reset authorization so it cannot be reused.
+            reset.ResetTokenHash = null;
+            reset.ResetTokenExpiresAt = null;
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -1067,14 +1108,17 @@ namespace ILAQA.Controllers
             });
         }
 
+
+
         [HttpPost("cancel-password-reset")]
         public async Task<IActionResult> CancelPasswordReset(
             [FromBody] CancelPasswordResetRequest request)
         {
-            var email = request.Email.Trim();
+            var email = request.Email.Trim().ToLowerInvariant();
 
             var user = await _userManager.FindByEmailAsync(email);
 
+            // Do not reveal whether the account exists.
             if (user == null || !user.EmailConfirmed)
             {
                 return Ok(new
@@ -1086,44 +1130,43 @@ namespace ILAQA.Controllers
             await using var transaction =
                 await _context.Database.BeginTransactionAsync();
 
+            // Lock the reset record to prevent simultaneous changes.
             var reset = await _context.PasswordResetOtps
-                .FromSqlInterpolated($@"
-            SELECT * FROM ""PasswordResetOtps""
-            WHERE ""UserId"" = {user.Id}
-            FOR UPDATE")
-                .FirstOrDefaultAsync();
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"PasswordResetOtps\" WHERE \"UserId\" = {user.Id} FOR UPDATE")
+                .SingleOrDefaultAsync();
 
             if (reset == null ||
-                reset.UsedAt != null ||
-                reset.ExpiresAt <= DateTime.UtcNow ||
-                reset.FailedAttempts >= 5)
+                reset.ResetTokenHash == null ||
+                reset.ResetTokenExpiresAt == null ||
+                reset.ResetTokenExpiresAt <= DateTime.UtcNow)
             {
-                return BadRequest(new
+                return Ok(new
                 {
-                    message = "This reset code is invalid or expired."
+                    message = "Password reset cancelled."
                 });
             }
 
-            var validCode = _otpService.VerifyOtp(
-                $"password-reset:{user.Id}",
-                request.Code,
-                reset.CodeHash
-            );
+            // Hash the token provided by the mobile app.
+            var receivedHash = SHA256.HashData(
+                Encoding.UTF8.GetBytes(request.ResetToken));
 
-            if (!validCode)
+            var expectedHash = Convert.FromHexString(
+                reset.ResetTokenHash);
+
+            // Only the correct token can cancel this reset.
+            if (!CryptographicOperations.FixedTimeEquals(
+                receivedHash, expectedHash))
             {
-                reset.FailedAttempts++;
-
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
-
                 return BadRequest(new
                 {
-                    message = "This reset code is invalid or expired."
+                    message = "Invalid reset authorization."
                 });
             }
 
-            reset.UsedAt = DateTime.UtcNow;
+            // Invalidate the reset authorization.
+            reset.ResetTokenHash = null;
+            reset.ResetTokenExpiresAt = null;
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -1133,6 +1176,7 @@ namespace ILAQA.Controllers
                 message = "Password reset cancelled."
             });
         }
+
 
 
 

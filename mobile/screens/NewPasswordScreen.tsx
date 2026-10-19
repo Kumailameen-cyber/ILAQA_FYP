@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import {
   View,
@@ -11,19 +10,26 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
+import AppPopup from '../components/AppPopup';
 
 const API_URL = 'http://192.168.100.232:5246';
 
 type Props = {
   email: string;
-  code: string;
+  resetToken: string;
   onResetSuccess: () => void;
   onBack: () => Promise<void>;
 };
 
+type Popup = {
+  type: 'error' | 'warning' | 'success';
+  title: string;
+  message: string;
+};
+
 export default function NewPasswordScreen({
   email,
-  code,
+  resetToken,
   onResetSuccess,
   onBack,
 }: Props) {
@@ -33,92 +39,86 @@ export default function NewPasswordScreen({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [error, setError] = useState('');
+  const [popup, setPopup] = useState<Popup | null>(null);
 
+  const showError = (message: string, title = 'SOMETHING WENT WRONG') => {
+    setPopup({ type: 'error', title, message });
+  };
 
+  const handleBackToLogin = async () => {
+    if (loading || cancelling) return;
 
-  
-const handleBackToLogin = async () => {
-  if (loading || cancelling) return;
+    setCancelling(true);
+    setPopup(null);
 
-  setCancelling(true);
-  setError('');
-
-  try {
-    await onBack();
-  } 
-catch (error) {
-  setError(
-    error instanceof Error
-      ? error.message
-      : 'Unable to cancel password reset. Please try again.'
-  );
-}
- finally {
-    setCancelling(false);
-  }
-};
-
+    try {
+      await onBack();
+    } catch (error) {
+      showError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to cancel password reset. Please try again.',
+        'CANNOT GO BACK'
+      );
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   const handleResetPassword = async () => {
     if (loading || cancelling) return;
+
     if (!newPassword || !confirmPassword) {
-        
-      setError('Please fill in both password fields.');
+      showError('Please fill in both password fields.', 'MISSING PASSWORD');
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setError('Passwords do not match.');
+      showError('Passwords do not match.', 'PASSWORD MISMATCH');
       return;
     }
 
     setLoading(true);
-    setError('');
+    setPopup(null);
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/reset-password`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            email,
-            code,
-            newPassword,
-          }),
-        }
-      );
+      const response = await fetch(`${API_URL}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, resetToken, newPassword }),
+      });
 
-      
-const data = await response.json().catch(() => null);
+      const data = await response.json().catch(() => null);
 
-if (response.status === 429) {
-  setError(
-    data?.message ||
-      'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
+      if (response.status === 429) {
+        showError(
+          data?.message ||
+            'Too many requests. Please wait a minute before trying again.',
+          'TOO MANY REQUESTS'
+        );
+        return;
+      }
 
       if (!response.ok) {
         const details = Array.isArray(data?.errors)
           ? data.errors.join('\n')
           : '';
 
-        setError(
+        showError(
           details ||
-          data?.message ||
-          'Unable to reset password. Please try again.'
+            data?.message ||
+            'Unable to reset password. Please try again.',
+          'RESET FAILED'
         );
         return;
       }
 
       onResetSuccess();
     } catch {
-      setError('Unable to connect to the server. Please try again.');
+      showError(
+        'Unable to connect to the server. Please try again.',
+        'CONNECTION ERROR'
+      );
     } finally {
       setLoading(false);
     }
@@ -138,12 +138,11 @@ if (response.status === 429) {
         <Text style={styles.heading}>NEW PASSWORD</Text>
 
         <Text style={styles.description}>
-          Your verification code was accepted.
-          Create a new password to secure your ILAQA account.
+          Your verification code was accepted. Create a new password to secure
+          your ILAQA account.
         </Text>
 
         <Text style={styles.label}>NEW PASSWORD</Text>
-
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.passwordInput}
@@ -153,15 +152,14 @@ if (response.status === 429) {
             autoCapitalize="none"
             autoCorrect={false}
             value={newPassword}
-            onChangeText={(value) => {
-              setNewPassword(value);
-              setError('');
-            }}
-            editable={!loading}
+            onChangeText={setNewPassword}
+            editable={!loading && !cancelling}
+            autoComplete="new-password"
           />
           <TouchableOpacity
-            onPress={() => setShowPassword(!showPassword)}
+            onPress={() => setShowPassword((previous) => !previous)}
             style={styles.visibilityButton}
+            disabled={loading || cancelling}
           >
             <Text style={styles.visibilityText}>
               {showPassword ? 'HIDE' : 'SHOW'}
@@ -170,7 +168,6 @@ if (response.status === 429) {
         </View>
 
         <Text style={styles.label}>CONFIRM PASSWORD</Text>
-
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.passwordInput}
@@ -180,15 +177,14 @@ if (response.status === 429) {
             autoCapitalize="none"
             autoCorrect={false}
             value={confirmPassword}
-            onChangeText={(value) => {
-              setConfirmPassword(value);
-              setError('');
-            }}
-            editable={!loading}
+            onChangeText={setConfirmPassword}
+            editable={!loading && !cancelling}
+            autoComplete="new-password"
           />
           <TouchableOpacity
-            onPress={() => setShowConfirmPassword(!showConfirmPassword)}
+            onPress={() => setShowConfirmPassword((previous) => !previous)}
             style={styles.visibilityButton}
+            disabled={loading || cancelling}
           >
             <Text style={styles.visibilityText}>
               {showConfirmPassword ? 'HIDE' : 'SHOW'}
@@ -200,55 +196,48 @@ if (response.status === 429) {
           Use a strong password that meets the registration requirements.
         </Text>
 
-        {error ? (
-          <Text style={styles.error}>{error}</Text>
-        ) : null}
-
-       
-<TouchableOpacity
-  style={[
-    styles.button,
-    (loading || cancelling) && styles.disabledButton,
-  ]}
-  onPress={handleResetPassword}
-  disabled={loading || cancelling}
-  activeOpacity={0.8}
->
-
+        <TouchableOpacity
+          style={[
+            styles.button,
+            (loading || cancelling) && styles.disabledButton,
+          ]}
+          onPress={handleResetPassword}
+          disabled={loading || cancelling}
+          activeOpacity={0.8}
+        >
           {loading ? (
             <ActivityIndicator color="#0C0D0C" />
           ) : (
-            <Text style={styles.buttonText}>
-              RESET PASSWORD →
-            </Text>
+            <Text style={styles.buttonText}>RESET PASSWORD →</Text>
           )}
         </TouchableOpacity>
 
-       
-<TouchableOpacity
-  style={styles.backButton}
-  onPress={handleBackToLogin}
-  disabled={loading || cancelling}
->
-  {cancelling ? (
-    <ActivityIndicator color="#C6FF35" />
-  ) : (
-    <Text style={styles.backText}>
-      ← BACK TO LOGIN
-    </Text>
-  )}
-</TouchableOpacity>
-
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={handleBackToLogin}
+          disabled={loading || cancelling}
+        >
+          {cancelling ? (
+            <ActivityIndicator color="#C6FF35" />
+          ) : (
+            <Text style={styles.backText}>← BACK TO LOGIN</Text>
+          )}
+        </TouchableOpacity>
       </ScrollView>
+
+      <AppPopup
+        visible={popup !== null}
+        type={popup?.type ?? 'error'}
+        title={popup?.title ?? ''}
+        message={popup?.message ?? ''}
+        onClose={() => setPopup(null)}
+      />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0C0D0C',
-  },
+  container: { flex: 1, backgroundColor: '#0C0D0C' },
   content: {
     flexGrow: 1,
     justifyContent: 'center',
@@ -266,6 +255,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 32,
     fontWeight: '900',
+    letterSpacing: -1,
     marginBottom: 14,
   },
   description: {
@@ -297,25 +287,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 16,
   },
-  visibilityButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  visibilityText: {
-    color: '#C6FF35',
-    fontSize: 11,
-    fontWeight: '800',
-  },
+  visibilityButton: { paddingHorizontal: 16, paddingVertical: 14 },
+  visibilityText: { color: '#C6FF35', fontSize: 11, fontWeight: '800' },
   hint: {
     color: '#888888',
     fontSize: 12,
     lineHeight: 19,
     marginBottom: 20,
-  },
-  error: {
-    color: '#FF7474',
-    fontSize: 13,
-    marginBottom: 16,
   },
   button: {
     backgroundColor: '#C6FF35',
@@ -324,20 +302,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 8,
   },
-  disabledButton: {
-    opacity: 0.6,
-  },
+  disabledButton: { opacity: 0.6 },
   buttonText: {
     color: '#0C0D0C',
     fontSize: 14,
     fontWeight: '900',
     letterSpacing: 1,
   },
-  backButton: {
-    alignItems: 'center',
-    marginTop: 28,
-    padding: 10,
-  },
+  backButton: { alignItems: 'center', marginTop: 28, padding: 10 },
   backText: {
     color: '#C6FF35',
     fontSize: 12,

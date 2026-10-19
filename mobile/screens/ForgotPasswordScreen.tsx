@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import {
   View,
@@ -11,6 +10,7 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
+import AppPopup from '../components/AppPopup';
 
 const API_URL = 'http://192.168.100.232:5246';
 
@@ -25,59 +25,57 @@ export default function ForgotPasswordScreen({
 }: Props) {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [popup, setPopup] = useState<{
+    title: string;
+    message: string;
+  } | null>(null);
+
+  const showError = (message: string) => {
+    setPopup({ title: 'UNABLE TO SEND CODE', message });
+  };
 
   const handleSendOtp = async () => {
+    if (loading) return;
+
     const normalizedEmail = email.trim().toLowerCase();
 
     if (!normalizedEmail) {
-      setError('Please enter your email address.');
+      showError('Please enter your email address.');
       return;
     }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      setError('Please enter a valid email address.');
+      showError('Please enter a valid email address.');
       return;
     }
 
     setLoading(true);
-    setError('');
+    setPopup(null);
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/forgot-password`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            email: normalizedEmail,
-          }),
-        }
-      );
+      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
 
-      
-const data = await response.json().catch(() => null);
+      const data = await response.json().catch(() => null);
 
-if (response.status === 429) {
-  setError(
-    'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
+      if (response.status === 429) {
+        showError('Too many requests. Please wait a minute before trying again.');
+        return;
+      }
 
-if (!response.ok) {
-  setError(
-    data?.message || 'Unable to send code. Please try again.'
-  );
-  return;
-}
-
+      if (!response.ok) {
+        showError(data?.message || 'Unable to send code. Please try again.');
+        return;
+      }
 
       onOtpRequested(normalizedEmail);
     } catch {
-      setError('Unable to connect to the server. Please try again.');
+      showError('Unable to connect to the server. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -111,22 +109,12 @@ if (!response.ok) {
           autoCapitalize="none"
           autoCorrect={false}
           value={email}
-          onChangeText={(value) => {
-            setEmail(value);
-            setError('');
-          }}
+          onChangeText={setEmail}
           editable={!loading}
         />
 
-        {error ? (
-          <Text style={styles.error}>{error}</Text>
-        ) : null}
-
         <TouchableOpacity
-          style={[
-            styles.button,
-            loading && styles.disabledButton,
-          ]}
+          style={[styles.button, loading && styles.disabledButton]}
           onPress={handleSendOtp}
           disabled={loading}
           activeOpacity={0.8}
@@ -146,6 +134,14 @@ if (!response.ok) {
           <Text style={styles.backText}>← BACK TO SIGN IN</Text>
         </TouchableOpacity>
       </ScrollView>
+
+      <AppPopup
+        visible={popup !== null}
+        type="error"
+        title={popup?.title ?? ''}
+        message={popup?.message ?? ''}
+        onClose={() => setPopup(null)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -198,11 +194,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     marginBottom: 20,
-  },
-  error: {
-    color: '#FF7474',
-    fontSize: 13,
-    marginBottom: 16,
   },
   button: {
     backgroundColor: '#C6FF35',

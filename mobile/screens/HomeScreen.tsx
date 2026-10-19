@@ -12,6 +12,7 @@ import { StatusBar } from 'expo-status-bar';
 type HomeScreenProps = {
   displayName: string;
   onLogout: () => void;
+  
 };
 
 export default function HomeScreen({
@@ -30,10 +31,14 @@ export default function HomeScreen({
       <View style={styles.content}>
         <Text style={styles.greeting}>WELCOME BACK,</Text>
 
-        <Text style={styles.name}>
-          {displayName.toUpperCase()}
-        </Text>
-
+        <Text
+  style={styles.name}
+  numberOfLines={1}
+  adjustsFontSizeToFit
+  minimumFontScale={0.6}
+>
+  {displayName.toUpperCase()}
+</Text>
         <Text style={styles.subtitle}>
           Your city. Your run. Your territory.
         </Text>
@@ -101,6 +106,7 @@ const styles = StyleSheet.create({
     fontSize: 42,
     fontWeight: '900',
     marginTop: 10,
+    width: '100%'
   },
   subtitle: {
     color: '#FFFFFF',

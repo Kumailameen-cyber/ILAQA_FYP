@@ -1,5 +1,4 @@
-
-import React, { useState,useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -11,13 +10,20 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
+import AppPopup from '../components/AppPopup';
 
 const API_URL = 'http://192.168.100.232:5246';
 
 type Props = {
   email: string;
-  onVerified: (code: string) => void;
+  onVerified: (resetToken: string) => void;
   onBack: () => void;
+};
+
+type Popup = {
+  type: 'error' | 'warning' | 'success';
+  title: string;
+  message: string;
 };
 
 export default function VerifyResetOtpScreen({
@@ -29,121 +35,115 @@ export default function VerifyResetOtpScreen({
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [resendCountdown, setResendCountdown] = useState(60);
-  const [error, setError] = useState('');
-  const [message, setMessage] = useState('');
+  const [popup, setPopup] = useState<Popup | null>(null);
 
-useEffect(() => {
-  if (resendCountdown <= 0) return;
+  const showError = (message: string) => {
+    setPopup({ type: 'error', title: 'VERIFICATION ERROR', message });
+  };
 
-  const timer = setTimeout(() => {
-    setResendCountdown((previous) => Math.max(0, previous - 1));
-  }, 1000);
+  const showSuccess = (message: string) => {
+    setPopup({ type: 'success', title: 'CODE REQUESTED', message });
+  };
 
-  return () => clearTimeout(timer);
-}, [resendCountdown]);
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+
+    const timer = setTimeout(() => {
+      setResendCountdown((previous) => Math.max(0, previous - 1));
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [resendCountdown]);
 
   const handleVerify = async () => {
+    if (loading || resending) return;
+
     if (!/^[0-9]{6}$/.test(code)) {
-      setError('Please enter a valid six-digit code.');
+      showError('Please enter a valid six-digit code.');
       return;
     }
 
     setLoading(true);
-    setError('');
-    setMessage('');
+    setPopup(null);
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/verify-reset-otp`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email, code }),
-        }
-      );
+      const response = await fetch(`${API_URL}/api/auth/verify-reset-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code }),
+      });
 
-      
-const data = await response.json().catch(() => null);
+      const data = await response.json().catch(() => null);
 
-if (response.status === 429) {
-  setError(
-    data?.message ||
-      'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
-
-if (!response.ok) {
-  setError(
-    data?.message || 'Unable to verify code. Try again.'
-  );
-  return;
-}
-
-
-      if (data?.verified !== true) {
-        setError('Verification was not confirmed.');
+      if (response.status === 429) {
+        showError(
+          data?.message ||
+            'Too many requests. Please wait a minute before trying again.'
+        );
         return;
       }
 
-      onVerified(code);
+      if (!response.ok) {
+        showError(data?.message || 'Unable to verify code. Try again.');
+        return;
+      }
+
+    
+if (
+  data?.verified !== true ||
+  typeof data?.resetToken !== 'string' ||
+  !data.resetToken
+) {
+  showError('Verification was not confirmed. Please try again.');
+  return;
+}
+
+// Pass the secure 15-minute reset token,
+// not the original six-digit OTP.
+onVerified(data.resetToken);
+
     } catch {
-      setError('Unable to connect to the server.');
+      showError('Unable to connect to the server.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleResend = async () => {
-    if (resending || loading|| resendCountdown > 0) return;
+    if (resending || loading || resendCountdown > 0) return;
 
     setResending(true);
-    setError('');
-    
-    setMessage('');
+    setPopup(null);
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/forgot-password`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email }),
-        }
-      );
+      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
 
       const data = await response.json().catch(() => null);
 
-      
-if (response.status === 429) {
-  setError(
-    data?.message ||
-      'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
+      if (response.status === 429) {
+        showError(
+          data?.message ||
+            'Too many requests. Please wait a minute before trying again.'
+        );
+        return;
+      }
 
-if (!response.ok) {
-  setError(data?.message || 'Unable to request a new code.');
-  return;
-}
+      if (!response.ok) {
+        showError(data?.message || 'Unable to request a new code.');
+        return;
+      }
 
-setResendCountdown(60);
-
-
-      
-// The backend may enforce a 60-second cooldown.
-// Keep the entered code because it might still be valid.
-setMessage(
-  'CODE SENT SUCCESSFULLY.'
-);
-
+      setResendCountdown(60);
+      // Keep the entered code: it may still be valid.
+      showSuccess(
+        'If a password reset is available for this email, a code will be sent. Check your inbox.'
+      );
     } catch {
-      setError('Unable to connect to the server.');
+      showError('Unable to connect to the server.');
     } finally {
       setResending(false);
     }
@@ -159,26 +159,20 @@ setMessage(
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.brand}>ILAQA.</Text>
-
         <Text style={styles.heading}>VERIFY YOUR CODE</Text>
 
-       
-<Text style={styles.description}>
-  Enter the six-digit password reset code sent to:
-</Text>
+        <Text style={styles.description}>
+          Enter the six-digit password reset code sent to:
+        </Text>
+        <Text style={styles.email}>{email}</Text>
 
-<Text style={styles.email}>{email}</Text>
-
-<Text style={styles.otpHint}>
-  If you recently requested a code for this email,
-  your previous code may still be valid for up to
-  60 seconds. Check your inbox before requesting
-  another code.
-</Text>
-
+        <Text style={styles.otpHint}>
+          If you recently requested a code for this email, your previous code
+          may still be valid for up to 60 seconds. Check your inbox before
+          requesting another code.
+        </Text>
 
         <Text style={styles.label}>VERIFICATION CODE</Text>
-
         <TextInput
           style={styles.input}
           placeholder="000000"
@@ -186,23 +180,12 @@ setMessage(
           keyboardType="number-pad"
           maxLength={6}
           value={code}
-          onChangeText={(value) => {
-            setCode(value.replace(/[^0-9]/g, ''));
-            setError('');
-            setMessage('');
-          }}
+          onChangeText={(value) => setCode(value.replace(/[^0-9]/g, ''))}
           editable={!loading && !resending}
           autoFocus
           textAlign="center"
+          textContentType="oneTimeCode"
         />
-
-        {error ? (
-          <Text style={styles.error}>{error}</Text>
-        ) : null}
-
-        {message ? (
-          <Text style={styles.message}>{message}</Text>
-        ) : null}
 
         <TouchableOpacity
           style={[
@@ -220,25 +203,23 @@ setMessage(
           )}
         </TouchableOpacity>
 
-        
-<TouchableOpacity
-  style={[
-    styles.resendButton,
-    (loading || resending || resendCountdown > 0) &&
-      styles.disabledButton,
-  ]}
-  onPress={handleResend}
-  disabled={loading || resending || resendCountdown > 0}
->
-  <Text style={styles.resendText}>
-    {resending
-      ? 'REQUESTING CODE...'
-      : resendCountdown > 0
-        ? `RESEND CODE IN ${resendCountdown}s`
-        : 'RESEND CODE'}
-  </Text>
-</TouchableOpacity>
-
+        <TouchableOpacity
+          style={[
+            styles.resendButton,
+            (loading || resending || resendCountdown > 0) &&
+              styles.disabledButton,
+          ]}
+          onPress={handleResend}
+          disabled={loading || resending || resendCountdown > 0}
+        >
+          <Text style={styles.resendText}>
+            {resending
+              ? 'REQUESTING CODE...'
+              : resendCountdown > 0
+                ? `RESEND CODE IN ${resendCountdown}s`
+                : 'RESEND CODE'}
+          </Text>
+        </TouchableOpacity>
 
         <TouchableOpacity
           style={styles.backButton}
@@ -248,6 +229,14 @@ setMessage(
           <Text style={styles.backText}>← CHANGE EMAIL</Text>
         </TouchableOpacity>
       </ScrollView>
+
+      <AppPopup
+        visible={popup !== null}
+        type={popup?.type ?? 'error'}
+        title={popup?.title ?? ''}
+        message={popup?.message ?? ''}
+        onClose={() => setPopup(null)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -307,17 +296,6 @@ const styles = StyleSheet.create({
     letterSpacing: 10,
     marginBottom: 20,
   },
-  error: {
-    color: '#FF7474',
-    fontSize: 13,
-    marginBottom: 16,
-  },
-  message: {
-    color: '#C6FF35',
-    fontSize: 13,
-    lineHeight: 20,
-    marginBottom: 16,
-  },
   button: {
     backgroundColor: '#C6FF35',
     paddingVertical: 18,
@@ -325,9 +303,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 8,
   },
-  disabledButton: {
-    opacity: 0.6,
-  },
+  disabledButton: { opacity: 0.6 },
   buttonText: {
     color: '#0C0D0C',
     fontSize: 14,
@@ -355,13 +331,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  
-otpHint: {
-  color: '#A0A0A0',
-  fontSize: 12,
-  lineHeight: 19,
-  marginTop: -18,
-  marginBottom: 24,
-},
-
+  otpHint: {
+    color: '#A0A0A0',
+    fontSize: 12,
+    lineHeight: 19,
+    marginTop: -18,
+    marginBottom: 24,
+  },
 });

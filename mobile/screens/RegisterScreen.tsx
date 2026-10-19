@@ -7,15 +7,26 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import PasswordInput from '../components/PasswordInput';
+import AppPopup from '../components/AppPopup';
+
+const API_URL = 'http://192.168.100.232:5246';
 
 type RegisterScreenProps = {
   onGoToLogin: () => void;
-   onRegistrationSuccess: (email: string) => void;
+  onRegistrationSuccess: (email: string) => void;
+};
+
+type PopupType = 'error' | 'warning' | 'success';
+
+type PopupState = {
+  type: PopupType;
+  title: string;
+  message: string;
 };
 
 export default function RegisterScreen({
@@ -28,38 +39,66 @@ export default function RegisterScreen({
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const [popup, setPopup] = useState<PopupState | null>(null);
+
+  // Reusable popup function
+  const showPopup = (
+    type: PopupType,
+    title: string,
+    message: string
+  ) => {
+    setPopup({ type, title, message });
+  };
+
   const handleRegister = async () => {
     if (loading) return;
 
+    // Check required fields
     if (
       !username.trim() ||
       !displayName.trim() ||
       !email.trim() ||
       !password
     ) {
-      Alert.alert('Missing details', 'Please fill in all fields.');
+      showPopup(
+        'warning',
+        'MISSING DETAILS',
+        'Please fill in all fields.'
+      );
       return;
     }
 
-    if (username.trim().length < 3 || username.trim().length > 30) {
-      Alert.alert(
-        'Invalid username',
+    // Username validation
+    if (
+      username.trim().length < 3 ||
+      username.trim().length > 30
+    ) {
+      showPopup(
+        'warning',
+        'INVALID USERNAME',
         'Username must be 3–30 characters.'
       );
       return;
     }
 
-    if (displayName.trim().length < 2 || displayName.trim().length > 50) {
-      Alert.alert(
-        'Invalid name',
+    // Display name validation
+    if (
+      displayName.trim().length < 2 ||
+      displayName.trim().length > 50
+    ) {
+      showPopup(
+        'warning',
+        'INVALID NAME',
         'Display name must be 2–50 characters.'
       );
       return;
     }
 
+    // Password validation
     if (password.length < 8) {
-      Alert.alert(
-        'Invalid password',
+      showPopup(
+        'warning',
+        'INVALID PASSWORD',
         'Password must be at least 8 characters.'
       );
       return;
@@ -69,7 +108,7 @@ export default function RegisterScreen({
 
     try {
       const response = await fetch(
-        'http://192.168.100.232:5246/api/auth/register',
+        `${API_URL}/api/auth/register`,
         {
           method: 'POST',
           headers: {
@@ -84,27 +123,36 @@ export default function RegisterScreen({
         }
       );
 
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
 
       if (response.ok) {
-  const registeredEmail = email.trim();
+        const registeredEmail = email.trim();
 
-  setUsername('');
-  setDisplayName('');
-  setEmail('');
-  setPassword('');
+        // Clear registration fields
+        setUsername('');
+        setDisplayName('');
+        setEmail('');
+        setPassword('');
 
-  onRegistrationSuccess(registeredEmail);
-} else {
-        const errors = data.errors
+        // Navigate to email OTP verification
+        onRegistrationSuccess(registeredEmail);
+      } else {
+        const errors = data?.errors
           ? Object.values(data.errors).flat().join('\n')
-          : data.message || data.title || 'Registration failed.';
+          : data?.message ||
+            data?.title ||
+            'Registration failed.';
 
-        Alert.alert('Registration failed', String(errors));
+        showPopup(
+          'error',
+          'REGISTRATION FAILED',
+          String(errors)
+        );
       }
-    } catch (error) {
-      Alert.alert(
-        'Connection error',
+    } catch {
+      showPopup(
+        'error',
+        'CONNECTION ERROR',
         'Cannot connect to ILAQA backend. Check that Visual Studio is running.'
       );
     } finally {
@@ -124,15 +172,19 @@ export default function RegisterScreen({
 
         <View style={styles.heading}>
           <Text style={styles.title}>OWN YOUR</Text>
+
           <Text style={[styles.title, styles.accent]}>
             GROUND.
           </Text>
+
           <Text style={styles.subtitle}>
             Create your account. Your city is waiting.
           </Text>
         </View>
 
+        {/* USERNAME */}
         <Text style={styles.label}>USERNAME</Text>
+
         <TextInput
           style={styles.input}
           placeholder="runner01"
@@ -141,18 +193,24 @@ export default function RegisterScreen({
           autoCorrect={false}
           value={username}
           onChangeText={setUsername}
+          editable={!loading}
         />
 
+        {/* DISPLAY NAME */}
         <Text style={styles.label}>DISPLAY NAME</Text>
+
         <TextInput
           style={styles.input}
           placeholder="Your name"
           placeholderTextColor="#777"
           value={displayName}
           onChangeText={setDisplayName}
+          editable={!loading}
         />
 
+        {/* EMAIL */}
         <Text style={styles.label}>EMAIL ADDRESS</Text>
+
         <TextInput
           style={styles.input}
           placeholder="you@example.com"
@@ -162,24 +220,25 @@ export default function RegisterScreen({
           autoCorrect={false}
           value={email}
           onChangeText={setEmail}
+          editable={!loading}
         />
 
+        {/* PASSWORD */}
         <Text style={styles.label}>PASSWORD</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="At least 8 characters"
-          placeholderTextColor="#777"
-          secureTextEntry
+
+        <PasswordInput
           value={password}
           onChangeText={setPassword}
-          autoCapitalize="none"
-autoCorrect={false}
+          placeholder="At least 8 characters"
+          autoComplete="new-password"
+          editable={!loading}
         />
 
+        {/* REGISTER BUTTON */}
         <TouchableOpacity
           style={[
             styles.button,
-            loading && { opacity: 0.6 },
+            loading && styles.disabled,
           ]}
           onPress={handleRegister}
           disabled={loading}
@@ -188,11 +247,12 @@ autoCorrect={false}
             <ActivityIndicator color="#101310" />
           ) : (
             <Text style={styles.buttonText}>
-              CREATE ACCOUNT  →
+              CREATE ACCOUNT →
             </Text>
           )}
         </TouchableOpacity>
 
+        {/* LOGIN LINK */}
         <Text style={styles.footer}>
           Already a runner?{' '}
           <Text
@@ -203,6 +263,15 @@ autoCorrect={false}
           </Text>
         </Text>
       </ScrollView>
+
+      {/* REUSABLE ILAQA POPUP */}
+      <AppPopup
+        visible={popup !== null}
+        type={popup?.type ?? 'error'}
+        title={popup?.title ?? ''}
+        message={popup?.message ?? ''}
+        onClose={() => setPopup(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -212,22 +281,26 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0C0D0C',
   },
+
   content: {
     flexGrow: 1,
     paddingHorizontal: 28,
     paddingTop: 55,
     paddingBottom: 40,
   },
+
   logo: {
     color: '#C6FF35',
     fontSize: 25,
     fontWeight: '900',
     letterSpacing: 2,
   },
+
   heading: {
     marginTop: 65,
     marginBottom: 40,
   },
+
   title: {
     color: '#FFFFFF',
     fontSize: 44,
@@ -235,14 +308,17 @@ const styles = StyleSheet.create({
     letterSpacing: -1.5,
     lineHeight: 48,
   },
+
   accent: {
     color: '#C6FF35',
   },
+
   subtitle: {
     color: '#999E99',
     fontSize: 14,
     marginTop: 15,
   },
+
   label: {
     color: '#A5A9A5',
     fontSize: 11,
@@ -250,6 +326,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginBottom: 9,
   },
+
   input: {
     backgroundColor: '#1C1E1C',
     color: '#FFFFFF',
@@ -261,6 +338,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     marginBottom: 22,
   },
+
   button: {
     backgroundColor: '#C6FF35',
     height: 56,
@@ -269,18 +347,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 14,
   },
+
+  disabled: {
+    opacity: 0.6,
+  },
+
   buttonText: {
     color: '#101310',
     fontWeight: '900',
     fontSize: 14,
     letterSpacing: 1,
   },
+
   footer: {
     color: '#A5A9A5',
     textAlign: 'center',
     marginTop: 30,
     fontSize: 13,
   },
+
   footerLink: {
     color: '#C6FF35',
     fontWeight: '700',

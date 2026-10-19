@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import AppPopup from '../components/AppPopup';
 
 const API_URL = 'http://192.168.100.232:5246';
 
@@ -30,8 +31,9 @@ export default function VerifyEmailScreen({
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
+  const [popup, setPopup] = useState<{type: 'error' | 'warning' | 'success'; title: string; message: string} | null>(null);
+  const showError = (message: string) => setPopup({type: 'error', title: 'VERIFICATION ERROR', message});
+  const showSuccess = (message: string) => setPopup({type: 'success', title: 'CODE REQUESTED', message});
 const [registrationExpired, setRegistrationExpired] = useState(false);
 const [resendCountdown, setResendCountdown] = useState(60);
 
@@ -60,8 +62,7 @@ const checkRegistrationExpired = (
   ) {
     setRegistrationExpired(true);
     setCode('');
-    setError('');
-    setMessage('');
+    setPopup(null);
     return true;
   }
 
@@ -73,12 +74,11 @@ const checkRegistrationExpired = (
     if (loading) return;
 
     if (!/^[0-9]{6}$/.test(code)) {
-      setError('Enter the six-digit code from your email.');
+      showError('Enter the six-digit code from your email.');
       return;
     }
 
-    setError('');
-    setMessage('');
+    setPopup(null);
     setLoading(true);
 
     try {
@@ -100,7 +100,7 @@ const checkRegistrationExpired = (
 const data = await response.json().catch(() => null);
 
 if (response.status === 429) {
-  setError(
+  showError(
     data?.message ||
       'Too many requests. Please wait a minute before trying again.'
   );
@@ -112,7 +112,7 @@ if (!response.ok) {
     return;
   }
 
-  setError(
+  showError(
     data?.message ||
       'Verification failed. Check your code.'
   );
@@ -122,7 +122,7 @@ if (!response.ok) {
 
       onVerified();
     } catch {
-      setError(
+      showError(
         'Cannot connect to the server. Try again.'
       );
     } finally {
@@ -134,8 +134,8 @@ if (!response.ok) {
     if (resending || loading || resendCountdown > 0) return;
 
     setCode('');
-    setResendCountdown(60);
-    setMessage('If verification is required, a new code will be sent. Check your inbox.');
+    setResending(true);
+    setPopup(null);
 
     try {
       const response = await fetch(
@@ -154,7 +154,7 @@ if (!response.ok) {
 const data = await response.json().catch(() => null);
 
 if (response.status === 429) {
-  setError(
+  showError(
     data?.message ||
       'Too many requests. Please wait a minute before trying again.'
   );
@@ -166,7 +166,7 @@ if (!response.ok) {
     return;
   }
 
-  setError(
+  showError(
     data?.message || 'Unable to resend code.'
   );
   return;
@@ -174,11 +174,10 @@ if (!response.ok) {
 
 
       setCode('');
-      setMessage(
-        'If verification is required, a new code will be sent. Check your inbox.'
-      );
+      setResendCountdown(60);
+      showSuccess('If verification is required, a new code will be sent. Check your inbox.');
     } catch {
-      setError('Connection failed. Try again.');
+      showError('Connection failed. Try again.');
     } finally {
       setResending(false);
     }
@@ -253,7 +252,7 @@ return (
             value={code}
             onChangeText={(value) => {
               setCode(value.replace(/[^0-9]/g, ''));
-              setError('');
+              setPopup(null);
             }}
             textContentType="oneTimeCode"
           />
@@ -262,13 +261,6 @@ return (
             Your code expires after 60 seconds.
           </Text>
 
-          {error ? (
-            <Text style={styles.error}>{error}</Text>
-          ) : null}
-
-          {message ? (
-            <Text style={styles.success}>{message}</Text>
-          ) : null}
 
           <TouchableOpacity
             style={[
@@ -315,6 +307,13 @@ return (
         </>
       )}
     </ScrollView>
+    <AppPopup
+      visible={popup !== null}
+      type={popup?.type ?? 'error'}
+      title={popup?.title ?? ''}
+      message={popup?.message ?? ''}
+      onClose={() => setPopup(null)}
+    />
   </SafeAreaView>
 );
 }
@@ -385,17 +384,6 @@ const styles = StyleSheet.create({
     color: '#999E99',
     fontSize: 12,
     marginTop: 12,
-  },
-  error: {
-    color: '#FF7777',
-    fontSize: 13,
-    marginTop: 18,
-  },
-  success: {
-    color: '#C6FF35',
-    fontSize: 13,
-    marginTop: 18,
-    lineHeight: 20,
   },
   button: {
     backgroundColor: '#C6FF35',

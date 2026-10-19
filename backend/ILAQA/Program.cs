@@ -183,7 +183,7 @@ builder.Services.AddSwaggerGen(options =>
 
 
 
-
+builder.Services.AddHttpClient<ILAQA.Services.SupabaseStorageService>();
 
 var app = builder.Build();
 

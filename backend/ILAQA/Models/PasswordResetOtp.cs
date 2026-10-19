@@ -8,30 +8,31 @@ namespace ILAQA.Models
     {
         public int Id { get; set; }
 
-        // The permanent Identity user requesting reset.
         [Required]
         public string UserId { get; set; } = string.Empty;
 
-        // Store only the hashed OTP.
         [Required]
         public string CodeHash { get; set; } = string.Empty;
 
-        public DateTime CreatedAt { get; set; } =
-            DateTime.UtcNow;
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-        // OTP remains valid for 10 minutes.
+        // Original OTP expiry: 60 seconds.
         public DateTime ExpiresAt { get; set; }
 
-        // Maximum five incorrect attempts.
         public int FailedAttempts { get; set; } = 0;
 
-        // Used OTPs cannot be reused.
         public DateTime? UsedAt { get; set; }
 
-        // Enforce 60-second resend cooldown.
         public DateTime? LastOtpSentAt { get; set; }
 
-        // Relationship with ASP.NET Core Identity user.
+        // Hash of the secure token issued after OTP verification.
+        // Null means no reset authorization has been issued.
+        [MaxLength(64)]
+        public string? ResetTokenHash { get; set; }
+
+        // Separate expiry for the password creation step.
+        public DateTime? ResetTokenExpiresAt { get; set; }
+
         public ApplicationUser User { get; set; } = null!;
     }
 }

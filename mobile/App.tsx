@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   StyleSheet,
   Alert,
+  Text,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
@@ -15,6 +16,10 @@ import VerifyEmailScreen from './screens/VerifyEmailScreen';
 import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
 import VerifyResetOtpScreen from './screens/VerifyResetOtpScreen';
 import NewPasswordScreen from './screens/NewPasswordScreen';
+import ProfileScreen from './screens/ProfileScreen';
+import BottomTabBar, {
+  MainTab,
+} from './components/BottomTabBar';
 const API_URL = 'http://192.168.100.232:5246';
 
 type Runner = {
@@ -34,11 +39,12 @@ type Screen =
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('login');
+  const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [runner, setRunner] = useState<Runner | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
 const [verificationEmail, setVerificationEmail] = useState('');
 const [resetEmail, setResetEmail] = useState('');
-const [resetCode, setResetCode] = useState('');
+const [resetToken, setResetToken] = useState('');
   useEffect(() => {
     const restoreSession = async () => {
       try {
@@ -151,6 +157,7 @@ if (!response.ok) {
   const handleLoginSuccess = (loggedInRunner: Runner) => {
     setRunner(loggedInRunner);
     setScreen('home');
+    setActiveTab('home');
   };
 
  
@@ -191,6 +198,7 @@ const handleLogout = async () => {
 
     setRunner(null);
     setScreen('login');
+    setActiveTab('home');
   } catch (error) {
     console.log('Logout failed:', error);
 
@@ -198,6 +206,21 @@ const handleLogout = async () => {
       'Logout failed',
       'Could not complete logout. Check your connection and try again.'
     );
+  }
+};
+
+const handleAccountDeleted = async () => {
+  // The backend has already deleted the account.
+  // No need to call the logout API.
+
+  try {
+    await SecureStore.deleteItemAsync('accessToken');
+    await SecureStore.deleteItemAsync('refreshToken');
+  } finally {
+    // Clear the logged-in user and return to Login.
+    setRunner(null);
+    setActiveTab('home');
+    setScreen('login');
   }
 };
 
@@ -213,14 +236,50 @@ const handleLogout = async () => {
     );
   }
 
-  if (screen === 'home' && runner) {
-    return (
-      <HomeScreen
-        displayName={runner.displayName}
-        onLogout={handleLogout}
-      />
+ 
+if (screen === 'home' && runner) {
+  return (
+    <View style={styles.mainContainer}>
+      <View style={styles.screenContainer}>
+        {activeTab === 'home' ? (
+          <HomeScreen
+            displayName={runner.displayName}
+            onLogout={handleLogout}
+            
+          />
+        ): activeTab === 'profile' ? (
+ 
+<ProfileScreen
+  onDisplayNameUpdated={(newName) => {
+    setRunner((current) =>
+      current
+        ? { ...current, displayName: newName }
+        : current
     );
-  }
+  }}
+  onAccountDeleted={handleAccountDeleted}
+/>
+)  : (
+          <View style={styles.comingSoonContainer}>
+            <Text style={styles.comingSoonTitle}>
+              {activeTab.toUpperCase()}
+            </Text>
+
+           <Text style={styles.comingSoonText}>
+  This feature is coming soon.
+</Text>
+          </View>
+        )}
+      </View>
+
+      <BottomTabBar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+      />
+    </View>
+  );
+}
+
 if (screen === 'verifyEmail') {
   return (
     <VerifyEmailScreen
@@ -243,28 +302,29 @@ if (screen === 'forgotPassword') {
     <ForgotPasswordScreen
       onOtpRequested={(email) => {
         setResetEmail(email);
-        setResetCode('');
+        setResetToken('');
         setScreen('verifyResetOtp');
       }}
       onBackToLogin={() => {
         setResetEmail('');
-        setResetCode('');
+        setResetToken('');
         setScreen('login');
       }}
     />
   );
 }
 
+
 if (screen === 'verifyResetOtp') {
   return (
     <VerifyResetOtpScreen
       email={resetEmail}
-      onVerified={(code) => {
-        setResetCode(code);
+      onVerified={(token) => {
+        setResetToken(token);
         setScreen('newPassword');
       }}
       onBack={() => {
-        setResetCode('');
+        setResetToken('');
         setScreen('forgotPassword');
       }}
     />
@@ -274,14 +334,16 @@ if (screen === 'verifyResetOtp') {
 
 
 
+
+
 if (screen === 'newPassword') {
   return (
     <NewPasswordScreen
       email={resetEmail}
-      code={resetCode}
+      resetToken={resetToken}
       onResetSuccess={() => {
         setResetEmail('');
-        setResetCode('');
+        setResetToken('');
         setScreen('login');
       }}
       onBack={async () => {
@@ -294,29 +356,27 @@ if (screen === 'newPassword') {
             },
             body: JSON.stringify({
               email: resetEmail,
-              code: resetCode,
+              resetToken: resetToken,
             }),
           }
         );
 
-       
-if (!response.ok) {
-  const data = await response.json().catch(() => null);
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
 
-  if (response.status === 429) {
-    throw new Error(
-      'Too many requests. Please wait a minute before trying again.'
-    );
-  }
+          if (response.status === 429) {
+            throw new Error(
+              'Too many requests. Please wait a minute before trying again.'
+            );
+          }
 
-  throw new Error(
-    data?.message || 'Password reset cancellation failed.'
-  );
-}
-
+          throw new Error(
+            data?.message || 'Password reset cancellation failed.'
+          );
+        }
 
         setResetEmail('');
-        setResetCode('');
+        setResetToken('');
         setScreen('login');
       }}
     />
@@ -334,7 +394,7 @@ if (screen === 'login') {
       onLoginSuccess={handleLoginSuccess}
       onForgotPassword={() => {
         setResetEmail('');
-        setResetCode('');
+        setResetToken('');
         setScreen('forgotPassword');
       }}
       onVerifyEmail={(email) => {
@@ -363,5 +423,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#0C0D0C',
     justifyContent: 'center',
     alignItems: 'center',
-  },
+  },mainContainer: {
+  flex: 1,
+  backgroundColor: '#0C0D0C',
+},
+screenContainer: {
+  flex: 1,
+},
+comingSoonContainer: {
+  flex: 1,
+  justifyContent: 'center',
+  alignItems: 'center',
+  backgroundColor: '#0C0D0C',
+},
+comingSoonTitle: {
+  color: '#C6FF35',
+  fontSize: 30,
+  fontWeight: '900',
+  letterSpacing: 2,
+},
+comingSoonText: {
+  color: '#999E99',
+  fontSize: 14,
+  marginTop: 12,
+}
 });

@@ -164,6 +164,13 @@ namespace ILAQA.Migrations
                     b.Property<DateTime?>("LastOtpSentAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTime?>("ResetTokenExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ResetTokenHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<DateTime?>("UsedAt")
                         .HasColumnType("timestamp with time zone");
 
