@@ -10,6 +10,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.ilaqa.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -21,8 +22,25 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    
     "plugins": [
-      "expo-secure-store"
-    ]
+  "expo-secure-store",
+  "expo-sqlite",
+  [
+    "expo-location",
+    {
+      "locationWhenInUsePermission": "ILAQA needs your location to track runs and claim territories.",
+      "locationAlwaysAndWhenInUsePermission": "ILAQA needs background location access to record your running route when the app is not open.",
+      "isAndroidBackgroundLocationEnabled": true,
+      "isAndroidForegroundServiceEnabled": true,
+      "isIosBackgroundLocationEnabled": true
+    }
+  ]
+],
+    "extra": {
+      "eas": {
+        "projectId": "66ccb26c-bc06-4e59-8f4c-108c58531294"
+      }
+    }
   }
 }

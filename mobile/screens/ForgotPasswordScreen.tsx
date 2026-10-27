@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import AppPopup from '../components/AppPopup';
 
-const API_URL = 'http://192.168.100.232:5246';
+import { API_URL } from '../config/api';
 
 type Props = {
   onOtpRequested: (email: string) => void;

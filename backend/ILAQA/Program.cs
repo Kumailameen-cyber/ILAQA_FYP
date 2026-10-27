@@ -21,9 +21,9 @@ if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException(
         "Database connection string not found.");
 }
-
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseNpgsql(connectionString));
+    options.UseNpgsql(connectionString,
+        npgsql => npgsql.UseNetTopologySuite()));
 builder.Services.AddDataProtection();
 
 builder.Services
@@ -123,6 +123,7 @@ builder.Services
 builder.Services.AddScoped<OtpService>();
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<JwtService>();
+builder.Services.AddScoped<GpsDistanceService>();
 builder.Services.AddScoped<EmailService>();
 builder.Services.AddHostedService<PendingRegistrationCleanupService>();
 // Add services to the container.

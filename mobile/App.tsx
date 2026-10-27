@@ -1,4 +1,4 @@
-
+import './services/backgroundLocationTask';
 import React, { useEffect, useState } from 'react';
 import {
   View,
@@ -20,7 +20,7 @@ import ProfileScreen from './screens/ProfileScreen';
 import BottomTabBar, {
   MainTab,
 } from './components/BottomTabBar';
-const API_URL = 'http://192.168.100.232:5246';
+import { API_URL } from './config/api';
 
 type Runner = {
   id: string;
