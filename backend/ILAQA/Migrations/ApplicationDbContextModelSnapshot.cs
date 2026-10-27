@@ -4,6 +4,7 @@ using ILAQA.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using NetTopologySuite.Geometries;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
@@ -20,6 +21,8 @@ namespace ILAQA.Migrations
                 .HasAnnotation("ProductVersion", "8.0.31")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "extensions", "postgis");
+            
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
             modelBuilder.Entity("ILAQA.Models.ApplicationUser", b =>
@@ -280,6 +283,136 @@ namespace ILAQA.Migrations
                     b.ToTable("RefreshTokens");
                 });
 
+            modelBuilder.Entity("ILAQA.Models.Run", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ActiveSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("ActiveStartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EndedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("SyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<double>("TotalDistanceMeters")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ValidationStatus")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("XpAwarded")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "StartedAt");
+
+                    b.ToTable("Runs");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.RunGpsPoint", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<double?>("AccuracyMeters")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("Latitude")
+                        .HasColumnType("double precision");
+
+                    b.Property<int>("LegNo")
+                        .HasColumnType("integer");
+
+                    b.Property<double>("Longitude")
+                        .HasColumnType("double precision");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("SequenceNo")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RunId", "RecordedAt");
+
+                    b.HasIndex("RunId", "SequenceNo")
+                        .IsUnique();
+
+                    b.ToTable("RunGpsPoints");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.Territory", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<double>("AreaSquareMeters")
+                        .HasColumnType("double precision");
+
+                    b.Property<Polygon>("Boundary")
+                        .IsRequired()
+                        .HasColumnType("geometry(Polygon,4326)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("MergedIntoTerritoryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("OwnerUserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("ShieldExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Boundary");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Boundary"), "gist");
+
+                    b.HasIndex("OwnerUserId");
+
+                    b.ToTable("Territories");
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
                 {
                     b.Property<string>("Id")
@@ -445,6 +578,37 @@ namespace ILAQA.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("ILAQA.Models.Run", b =>
+                {
+                    b.HasOne("ILAQA.Models.ApplicationUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.RunGpsPoint", b =>
+                {
+                    b.HasOne("ILAQA.Models.Run", "Run")
+                        .WithMany("GpsPoints")
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Run");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.Territory", b =>
+                {
+                    b.HasOne("ILAQA.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("OwnerUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
                 {
                     b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
@@ -494,6 +658,11 @@ namespace ILAQA.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("ILAQA.Models.Run", b =>
+                {
+                    b.Navigation("GpsPoints");
                 });
 #pragma warning restore 612, 618
         }

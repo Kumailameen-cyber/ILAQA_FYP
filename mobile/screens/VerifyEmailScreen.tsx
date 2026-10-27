@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import AppPopup from '../components/AppPopup';
 
-const API_URL = 'http://192.168.100.232:5246';
+import { API_URL } from '../config/api';
 
 type Props = {
   email: string;

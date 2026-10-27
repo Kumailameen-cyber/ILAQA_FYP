@@ -14,7 +14,7 @@ import { StatusBar } from 'expo-status-bar';
 import PasswordInput from '../components/PasswordInput';
 import AppPopup from '../components/AppPopup';
 
-const API_URL = 'http://192.168.100.232:5246';
+import { API_URL } from '../config/api';
 
 type RegisterScreenProps = {
   onGoToLogin: () => void;
