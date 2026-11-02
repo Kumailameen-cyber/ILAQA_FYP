@@ -102,6 +102,15 @@ namespace ILAQA.Data
             });
             builder.Entity<Territory>(entity =>
             {
+                // Link each territory to the run that created it.
+                entity.HasOne<Run>()
+                      .WithMany()
+                      .HasForeignKey(t => t.RunId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                // Prevent the same run from saving a loop twice.
+                entity.HasIndex(t => new { t.RunId, t.LoopIndex })
+                      .IsUnique();
                 entity.HasOne<ApplicationUser>()
                       .WithMany()
                       .HasForeignKey(t => t.OwnerUserId)

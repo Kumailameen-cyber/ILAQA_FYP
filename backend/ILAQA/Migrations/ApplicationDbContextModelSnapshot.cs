@@ -21,8 +21,7 @@ namespace ILAQA.Migrations
                 .HasAnnotation("ProductVersion", "8.0.31")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
-            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "extensions", "postgis");
-            
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
             modelBuilder.Entity("ILAQA.Models.ApplicationUser", b =>
@@ -384,12 +383,18 @@ namespace ILAQA.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("LoopIndex")
+                        .HasColumnType("integer");
+
                     b.Property<Guid?>("MergedIntoTerritoryId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("OwnerUserId")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<Guid?>("RunId")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTime?>("ShieldExpiresAt")
                         .HasColumnType("timestamp with time zone");
@@ -409,6 +414,9 @@ namespace ILAQA.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Boundary"), "gist");
 
                     b.HasIndex("OwnerUserId");
+
+                    b.HasIndex("RunId", "LoopIndex")
+                        .IsUnique();
 
                     b.ToTable("Territories");
                 });
@@ -607,6 +615,11 @@ namespace ILAQA.Migrations
                         .HasForeignKey("OwnerUserId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("ILAQA.Models.Run", null)
+                        .WithMany()
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
