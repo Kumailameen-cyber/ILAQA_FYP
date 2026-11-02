@@ -10,9 +10,25 @@ module.exports = ({ config }) => {
     );
   }
 
+  const isDevelopment =
+  process.env.APP_VARIANT === 'development' ||
+  process.env.EAS_BUILD_PROFILE === 'development';
+
   return {
     ...config,
 
+    // Different name for the Development APK.
+    name: isDevelopment ? 'ILAQA DEV' : config.name,
+
+    // Different package ID prevents replacing the Preview APK.
+    android: {
+      ...config.android,
+      package: isDevelopment
+        ? 'com.ilaqa.app.localtest'
+        : 'com.ilaqa.app',
+    },
+
+    // Keep Google Maps working.
     plugins: [
       ...(config.plugins || []),
 

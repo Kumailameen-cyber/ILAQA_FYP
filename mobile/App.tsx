@@ -243,6 +243,7 @@ if (screen === 'home' && runner) {
       <View style={styles.screenContainer}>
         {activeTab === 'home' ? (
           <HomeScreen
+          runnerId={runner.id}
             displayName={runner.displayName}
             onLogout={handleLogout}
             

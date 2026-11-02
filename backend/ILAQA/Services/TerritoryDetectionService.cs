@@ -153,6 +153,8 @@ namespace ILAQA.Services
             {
                 return null;
             }
+            if (!IsWideEnough(polygon))
+                return null;
 
             return polygon;
         }
@@ -174,6 +176,23 @@ namespace ILAQA.Services
                 metersPerDegreeLongitude;
 
             return Math.Abs(areaSquareMeters);
+        }
+        private const double MinHalfWidthMeters = 8; // territory must be at least 16 m wide
+
+        private static bool IsWideEnough(Polygon polygon)
+        {
+            // Convert degrees to meters so we can shrink by a real distance.
+            double mLat = 111320;
+            double mLon = 111320 * Math.Cos(polygon.Centroid.Y * Math.PI / 180);
+
+            var ring = polygon.ExteriorRing.Coordinates
+                .Select(c => new Coordinate(c.X * mLon, c.Y * mLat))
+                .ToArray();
+
+            var meters = new GeometryFactory().CreatePolygon(ring);
+
+            // If shrinking by 8 m leaves nothing, the shape is a thin strip.
+            return !meters.Buffer(-MinHalfWidthMeters).IsEmpty;
         }
         // Find every valid territory in a completed run.
         public List<Polygon> FindTerritories(List<RunGpsPoint> points)
@@ -244,6 +263,13 @@ namespace ILAQA.Services
                 // Try progressively longer paths.
                 for (int end = start + 3; end < section.Count; end++)
                 {
+                    // Cheap check first: skip if the end is too far from the start.
+                    double gap = _gpsDistanceService.CalculateDistance(
+                        section[start].Latitude, section[start].Longitude,
+                        section[end].Latitude, section[end].Longitude);
+
+                    if (gap > MaxClosureDistanceMeters)
+                        continue;
                     var loop = section.GetRange(
                         start,
                         end - start + 1);

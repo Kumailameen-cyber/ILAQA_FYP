@@ -6,7 +6,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
-  Alert,
+  Alert, Platform
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -23,23 +23,29 @@ import * as Location from 'expo-location';
 import * as Crypto from 'expo-crypto';
 
 import { BACKGROUND_LOCATION_TASK } from '../services/backgroundLocationTask';
-
 import {
   setActiveRun,
   setRunRecording,
   clearActiveRun,
   getRunPoints,
-  resumeRunRecording
+  resumeRunRecording,
+  registerRunForSync,
+  markRunFinishRequested,
+  getConfirmedTerritories,
+  ConfirmedTerritory,
+  saveGpsPoint
 } from '../services/runStorage';
-
-
-
 import {
-  detectTerritoriesByLeg,
-  TerritoryCandidate,
-} from '../services/territoryDetection';
+  syncRun,
+  syncPendingRuns,
+  fetchSavedTerritories,
+  fetchSavedRoutes,
+  SavedRunRoute,
+} from '../services/runSync';
+
 
 type HomeScreenProps = {
+  runnerId: string;
   displayName: string;
   onLogout: () => void;
 };
@@ -88,6 +94,7 @@ function formatDuration(seconds: number): string {
 }
 
 export default function HomeScreen({
+  runnerId,
   displayName,
   onLogout,
 }: HomeScreenProps) {
@@ -101,16 +108,61 @@ export default function HomeScreen({
   const segmentStartedAtRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const statusRef = useRef<RunStatus>('idle');
-const activeRunIdRef = useRef<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
   const [location, setLocation] =
     useState<Location.LocationObjectCoords | null>(null);
   const [loading, setLoading] = useState(true);
   const [locationError, setLocationError] = useState('');
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
-  const [route, setRoute] = useState<LatLng[]>([]);
   
-const [territoryCandidates, setTerritoryCandidates] =
-  useState<TerritoryCandidate[]>([]);
+  const [confirmedTerritories, setConfirmedTerritories] =
+    useState<ConfirmedTerritory[]>([]);
+  const [savedRoutes, setSavedRoutes] =
+    useState<SavedRunRoute[]>([]);
+  const [savedTerritories, setSavedTerritories] =
+    useState<ConfirmedTerritory[]>([]);
+
+  // Load confirmed territory boundaries from the backend.
+  useEffect(() => {
+    let mounted = true;
+
+    const loadSavedTerritories = async () => {
+      try {
+        const territories = await fetchSavedTerritories();
+        if (mounted) {
+          setSavedTerritories(territories);
+          console.log('ILAQA SAVED TERRITORIES:', territories.length);
+        }
+      } catch (error) {
+        console.error('Unable to load saved territories:', error);
+      }
+    };
+
+    void loadSavedTerritories();
+    return () => { mounted = false; };
+  }, [runnerId]);
+
+  // Load historical GPS routes independently (never nest React hooks).
+  useEffect(() => {
+    let mounted = true;
+
+    const loadRoutes = async () => {
+      try {
+        const routes = await fetchSavedRoutes();
+        if (mounted) {
+          setSavedRoutes(routes);
+          console.log('ILAQA SAVED ROUTES:', routes.length);
+        }
+      } catch (error) {
+        console.error('Unable to load saved routes:', error);
+      }
+    };
+
+    void loadRoutes();
+    return () => { mounted = false; };
+  }, [runnerId]);
+
+  const [syncMessage, setSyncMessage] = useState('');
 
   const [distanceMeters, setDistanceMeters] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -182,6 +234,36 @@ const [territoryCandidates, setTerritoryCandidates] =
     };
   }, []);
 
+  // Recover backend-confirmed claims and retry failed GPS uploads every 5 seconds.
+  // SQLite remains the source of GPS recordings when the internet is offline.
+  useEffect(() => {
+    let mounted = true;
+    let busy = false;
+    const syncAndRefresh = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        // Upload current run first, and then any pending finished runs.
+        const current = activeRunIdRef.current;
+        if (current) await syncRun(current);
+        await syncPendingRuns(runnerId);
+        const territories = await getConfirmedTerritories(runnerId);
+        if (mounted) {
+          setConfirmedTerritories(territories);
+          setSyncMessage('');
+        }
+      } catch (error) {
+        console.log('ILAQA: live territory sync pending:', error);
+        if (mounted) setSyncMessage('GPS saved locally. Server sync pending.');
+      } finally {
+        busy = false;
+      }
+    };
+    void syncAndRefresh();
+    const timer = setInterval(() => { void syncAndRefresh(); }, 5000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, [runnerId]);
+
   // Wall-clock timing keeps working when the phone is locked.
   useEffect(() => {
     if (runStatus !== 'running') return;
@@ -217,7 +299,7 @@ const [territoryCandidates, setTerritoryCandidates] =
         // Basic GPS accuracy filtering.
         if (
           coords.accuracy !== null &&
-          coords.accuracy > 40
+          coords.accuracy > 30
         ) {
           return;
         }
@@ -242,9 +324,22 @@ const [territoryCandidates, setTerritoryCandidates] =
         }
 
         lastLivePointRef.current = point;
+        // Save valid foreground GPS points to SQLite as well.
+const currentRunId = activeRunIdRef.current;
+
+if (currentRunId) {
+  void saveGpsPoint(
+    currentRunId,
+    coords.latitude,
+    coords.longitude,
+    coords.accuracy,
+    position.timestamp
+  ).catch((error) => {
+    console.error('ILAQA foreground GPS save failed:', error);
+  });
+}
         const nextRoute = [...previousRoute, point];
         routeRef.current = nextRoute;
-        setRoute(nextRoute);
         const nextSegment = [...activeSegmentRef.current, point];
         activeSegmentRef.current = nextSegment;
         setRouteSegments((segments) => [...segments.slice(0, -1), nextSegment]);
@@ -259,6 +354,11 @@ const [territoryCandidates, setTerritoryCandidates] =
       subscription.remove();
     }
   };
+
+
+ 
+
+
 const startBackgroundTracking = async () => {
   const foregroundPermission =
     await Location.getForegroundPermissionsAsync();
@@ -358,6 +458,8 @@ const startRun = async () => {
 
     // Create a unique ID for this run.
     const runId = Crypto.randomUUID();
+    // Keep the original UTC start time so /start can be safely retried.
+    await registerRunForSync(runId, runnerId, new Date().toISOString());
 
     await setActiveRun(runId);
     activeRunIdRef.current = runId;
@@ -376,8 +478,6 @@ const startRun = async () => {
     lastLivePointRef.current = null;
     activeSegmentRef.current = [];
     setRouteSegments([[]]);
-    setRoute([]);
-    setTerritoryCandidates([]);
     setDistanceMeters(0);
     
     elapsedBeforeSegmentRef.current = 0;
@@ -387,6 +487,13 @@ const startRun = async () => {
 
     updateRunStatus('running');
     await startGpsWatcher();
+    // Starting the server run is part of syncRun; it retries offline.
+    void syncRun(runId)
+      .then(async () => setConfirmedTerritories(await getConfirmedTerritories(runnerId)))
+      .catch((error) => {
+        console.log('Run will sync when online:', error);
+        setSyncMessage('GPS saved locally. Server sync pending.');
+      });
 
     centerMap(
       initialLocation.coords.latitude,
@@ -401,6 +508,7 @@ const startRun = async () => {
 
     if (activeRunIdRef.current) {
       try {
+        await markRunFinishRequested(activeRunIdRef.current);
         await setRunRecording(activeRunIdRef.current, false);
       } catch (cleanupError) {
         console.error('Unable to disable run recording:', cleanupError);
@@ -522,19 +630,31 @@ await resumeRunRecording(runId);
           try {
             const runId = await stopAndKeepSavedPoints();
             const savedPoints = runId ? await getRunPoints(runId) : [];
+            // Queue Finish *before* clearing the active marker.
+            if (runId) await markRunFinishRequested(runId);
             await clearActiveRun();
             activeRunIdRef.current = null;
             routeRef.current = [];
             lastLivePointRef.current = null;
             activeSegmentRef.current = [];
-            setRoute([]);
             setRouteSegments([]);
             setDistanceMeters(0);
             setElapsedSeconds(0);
             elapsedBeforeSegmentRef.current = 0;
             updateRunStatus('idle');
-            Alert.alert('Run Completed',
-              `Live distance: ${totalKm} km\nTime: ${totalTime}\nGPS points stored: ${savedPoints.length}\n\nRoute points remain in SQLite. Run summary/history sync will be added later.`);
+            Alert.alert('Run Saved',
+              `Live distance: ${totalKm} km\nTime: ${totalTime}\nGPS points stored: ${savedPoints.length}\n\nGPS points are stored on your phone. Territory claims will sync with the backend when connected.`);
+            if (runId) {
+              void syncRun(runId)
+                .then(async () => {
+                  setConfirmedTerritories(await getConfirmedTerritories(runnerId));
+                  setSyncMessage('');
+                })
+                .catch((error) => {
+                  console.log('Finish queued for retry:', error);
+                  setSyncMessage('Run saved locally. Finish sync pending.');
+                });
+            }
           } catch (error) {
             console.error('Unable to finish run safely:', error);
             Alert.alert('Finish Error', 'Could not fully stop tracking. Your run has not been cleared. Try Finish again.');
@@ -547,100 +667,6 @@ await resumeRunRecording(runId);
     ]);
   };
 
-
-const checkSavedTerritories = async () => {
-  try {
-    const runId = activeRunIdRef.current;
-
-    if (!runId) {
-      Alert.alert('No Active Run', 'Start a run first.');
-      return;
-    }
-
-    // Read GPS points already saved in SQLite.
-    const savedPoints = await getRunPoints(runId);
-
-    // Include timestamps and accuracy for GPS validation.
-    const gpsPoints = savedPoints.map((point) => ({
-      latitude: point.latitude,
-      longitude: point.longitude,
-      legNo: point.legNo,
-      timestamp: point.timestamp,
-      accuracy: point.accuracy,
-    }));
-
-    // Detect territories using validated GPS movement.
-    const candidates = detectTerritoriesByLeg(gpsPoints);
-
-    // Show detected territory previews on the map.
-    setTerritoryCandidates(candidates);
-
-    console.log('ILAQA TERRITORY TEST:', {
-      gpsPoints: savedPoints.length,
-      territoriesFound: candidates.length,
-      areas: candidates.map(
-        (candidate) => candidate.areaSquareMeters
-      ),
-    });
-
-    Alert.alert(
-      'Territory Detection',
-      `GPS points: ${savedPoints.length}\n` +
-      `Territories detected: ${candidates.length}`
-    );
-  } catch (error) {
-    console.error('Territory detection failed:', error);
-    Alert.alert('Error', 'Unable to detect territories.');
-  }
-};
-
-
-const testSavedLegs = async () => {
-  try {
-    const runId = activeRunIdRef.current;
-
-    if (!runId) {
-      Alert.alert(
-        'No Active Run',
-        'Start a new run before testing GPS legs.'
-      );
-      return;
-    }
-
-    const points = await getRunPoints(runId);
-
-    const legCounts: Record<number, number> = {};
-
-    for (const point of points) {
-      legCounts[point.legNo] =
-        (legCounts[point.legNo] ?? 0) + 1;
-    }
-
-    console.log('ILAQA LEG TEST:', {
-      runId,
-      totalPoints: points.length,
-      legCounts,
-    });
-
-    const summary = Object.entries(legCounts)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(
-        ([leg, count]) =>
-          `Leg ${leg}: ${count} GPS points`
-      )
-      .join('\n');
-
-    Alert.alert(
-      'GPS Leg Test',
-      `Total points: ${points.length}\n\n${
-        summary || 'No GPS points recorded yet.'
-      }`
-    );
-  } catch (error) {
-    console.error('Leg test failed:', error);
-    Alert.alert('Error', 'Unable to read GPS points.');
-  }
-};
 
   const recenterMap = () => {
     if (location) {
@@ -665,7 +691,8 @@ const testSavedLegs = async () => {
             busyRef.current = true;
             setStartingRun(true);
             try {
-              await stopAndKeepSavedPoints();
+              const endingRunId = await stopAndKeepSavedPoints();
+              if (endingRunId) await markRunFinishRequested(endingRunId);
               await clearActiveRun();
               activeRunIdRef.current = null;
               onLogout();
@@ -688,7 +715,7 @@ const testSavedLegs = async () => {
 
       <View style={styles.header}>
         <View>
-          <Text style={styles.logo}>ILAQA®</Text>
+          <Text style={styles.logo}>ILAQA® </Text>
           <Text style={styles.greeting}>
             WELCOME, {displayName.toUpperCase()}
           </Text>
@@ -712,7 +739,7 @@ const testSavedLegs = async () => {
         <MapView
           ref={mapRef}
           style={styles.map}
-          provider={PROVIDER_GOOGLE}
+          provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
           initialRegion={KARACHI_REGION}
           showsUserLocation={location !== null}
           showsMyLocationButton={false}
@@ -740,23 +767,50 @@ const testSavedLegs = async () => {
               />
             ) : null
           )}
-{territoryCandidates.map((territory, index) => (
+          {savedTerritories.map((territory) => (
   <Polygon
-    key={`territory-preview-${index}`}
+    key={`saved-${territory.territoryId}`}
     coordinates={territory.boundary}
-    fillColor="rgba(198, 255, 53, 0.25)"
+    fillColor="rgba(198, 255, 53, 0.35)"
     strokeColor="#C6FF35"
     strokeWidth={3}
     tappable
-    onPress={() => {
+    onPress={() =>
       Alert.alert(
-        'Territory Preview',
-        `Area: ${territory.areaSquareMeters.toFixed(2)} m²\n\n` +
-        'This territory has not been approved by the backend yet.'
-      );
-    }}
+        'Saved Territory',
+        `Area: ${territory.areaSquareMeters.toFixed(2)} m²\nSaved in Supabase`
+      )
+    }
   />
 ))}
+{confirmedTerritories.map((territory) => (
+  <Polygon
+    key={`territory-confirmed-${territory.territoryId}`}
+    coordinates={territory.boundary}
+    fillColor="rgba(198, 255, 53, 0.35)"
+    strokeColor="#C6FF35"
+    strokeWidth={4}
+    tappable
+    onPress={() => Alert.alert(
+      'Claimed Territory',
+      `Confirmed by backend\nArea: ${territory.areaSquareMeters.toFixed(2)} m²`
+    )}
+  />
+))}
+
+          {/* Historical GPS routes from Supabase; one polyline per leg. */}
+          {savedRoutes.map((run) =>
+            run.legs.map((leg) =>
+              leg.coordinates.length >= 2 ? (
+                <Polyline
+                  key={`saved-route-${run.runId}-${leg.legNo}`}
+                  coordinates={leg.coordinates}
+                  strokeColor="#38BDF8"
+                  strokeWidth={3}
+                />
+              ) : null
+            )
+          )}
 
         </MapView>
 
@@ -783,22 +837,12 @@ const testSavedLegs = async () => {
       </View>
 
       <View style={styles.runPanel}>
-        
-<TouchableOpacity
-  onPress={testSavedLegs}
-  style={{
-    backgroundColor: '#333733',
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 10,
-    alignItems: 'center',
-  }}
->
-  <Text style={{ color: '#C6FF35', fontWeight: 'bold' }}>
-    TEST GPS LEGS
-  </Text>
-</TouchableOpacity>
 
+        {!!syncMessage && (
+          <Text style={{ color: '#FFBE55', fontSize: 11, marginBottom: 8 }}>
+            {syncMessage}
+          </Text>
+        )}
         <View style={styles.statsRow}>
           <View style={styles.stat}>
             <Text style={styles.statValue}>

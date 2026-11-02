@@ -6,6 +6,10 @@ namespace ILAQA.Models
     {
         public Guid Id { get; set; } = Guid.NewGuid();
 
+        public Guid? RunId { get; set; }
+
+        public int LoopIndex { get; set; }
+
         public string OwnerUserId { get; set; } = string.Empty;
 
         public Polygon Boundary { get; set; } = null!;
