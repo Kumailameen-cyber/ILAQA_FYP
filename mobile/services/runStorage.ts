@@ -17,6 +17,11 @@ export type ConfirmedTerritory = {
   loopIndex?: number;
   areaSquareMeters: number;
   boundary: { latitude: number; longitude: number }[];
+  // From GET /api/runs/territories (map view).
+  colorHex?: string;
+  ownerLabel?: string;
+  isMine?: boolean;
+  isShielded?: boolean;
 };
 
 export type RunSyncRecord = {
@@ -32,7 +37,8 @@ let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 let initializationPromise: Promise<void> | null = null;
 
 async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
-  if (!databasePromise) databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME);
+  if (!databasePromise)
+    databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME);
   return databasePromise;
 }
 
@@ -133,8 +139,18 @@ export async function saveGpsPoint(
          SELECT 1 FROM gps_points
          WHERE run_id = ? AND latitude = ? AND longitude = ? AND timestamp = ?
        )`,
-    [runId, latitude, longitude, accuracy, timestamp, runId,
-      runId, latitude, longitude, timestamp]
+    [
+      runId,
+      latitude,
+      longitude,
+      accuracy,
+      timestamp,
+      runId,
+      runId,
+      latitude,
+      longitude,
+      timestamp,
+    ]
   );
 }
 
@@ -184,14 +200,15 @@ export async function getActiveRunId(): Promise<string | null> {
 }
 
 export async function setRunRecording(
-  runId: string, isRecording: boolean
+  runId: string,
+  isRecording: boolean
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
-  await db.runAsync(
-    'UPDATE active_run SET is_recording = ? WHERE run_id = ?',
-    [isRecording ? 1 : 0, runId]
-  );
+  await db.runAsync('UPDATE active_run SET is_recording = ? WHERE run_id = ?', [
+    isRecording ? 1 : 0,
+    runId,
+  ]);
 }
 
 export async function clearActiveRun(): Promise<void> {
@@ -203,7 +220,9 @@ export async function clearActiveRun(): Promise<void> {
 // ==== Offline-safe upload queue (new) ====
 
 export async function registerRunForSync(
-  runId: string, ownerUserId: string, startedAt: string
+  runId: string,
+  ownerUserId: string,
+  startedAt: string
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -242,7 +261,9 @@ export async function getPendingRunIds(ownerUserId: string): Promise<string[]> {
 }
 
 export async function getUnuploadedRunPoints(
-  runId: string, uploadedThroughId: number, limit = 100
+  runId: string,
+  uploadedThroughId: number,
+  limit = 100
 ): Promise<StoredGpsPoint[]> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -256,7 +277,8 @@ export async function getUnuploadedRunPoints(
 }
 
 export async function markPointsUploaded(
-  runId: string, throughId: number
+  runId: string,
+  throughId: number
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -280,10 +302,9 @@ export async function markRunFinishRequested(runId: string): Promise<void> {
 export async function markServerRunEnded(runId: string): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
-  await db.runAsync(
-    'UPDATE run_sync SET server_ended = 1 WHERE run_id = ?',
-    [runId]
-  );
+  await db.runAsync('UPDATE run_sync SET server_ended = 1 WHERE run_id = ?', [
+    runId,
+  ]);
 }
 
 export async function cacheConfirmedTerritories(
@@ -304,9 +325,14 @@ export async function cacheConfirmedTerritories(
          loop_index = excluded.loop_index,
          area_square_meters = excluded.area_square_meters,
          boundary_json = excluded.boundary_json`,
-      [territory.territoryId, runId, ownerUserId,
-        territory.loopIndex ?? null, territory.areaSquareMeters,
-        JSON.stringify(territory.boundary)]
+      [
+        territory.territoryId,
+        runId,
+        ownerUserId,
+        territory.loopIndex ?? null,
+        territory.areaSquareMeters,
+        JSON.stringify(territory.boundary),
+      ]
     );
   }
 }
@@ -332,14 +358,40 @@ export async function getConfirmedTerritories(
     try {
       const boundary = JSON.parse(row.boundaryJson);
       if (!Array.isArray(boundary) || boundary.length < 4) return [];
-      return [{
-        territoryId: row.territoryId,
-        loopIndex: row.loopIndex ?? undefined,
-        areaSquareMeters: row.areaSquareMeters,
-        boundary,
-      }];
+      return [
+        {
+          territoryId: row.territoryId,
+          loopIndex: row.loopIndex ?? undefined,
+          areaSquareMeters: row.areaSquareMeters,
+          boundary,
+        },
+      ];
     } catch {
       return [];
     }
   });
+}
+
+export async function inspectSavedRuns() {
+  await initializeRunStorage();
+  const db = await getDatabase();
+
+  return db.getAllAsync<{
+    runId: string;
+    pointCount: number;
+    firstTimestamp: number;
+    lastTimestamp: number;
+    hasSyncRecord: number;
+  }>(`
+    SELECT
+      p.run_id AS runId,
+      COUNT(*) AS pointCount,
+      MIN(p.timestamp) AS firstTimestamp,
+      MAX(p.timestamp) AS lastTimestamp,
+      CASE WHEN s.run_id IS NULL THEN 0 ELSE 1 END AS hasSyncRecord
+    FROM gps_points p
+    LEFT JOIN run_sync s ON s.run_id = p.run_id
+    GROUP BY p.run_id
+    ORDER BY lastTimestamp DESC
+  `);
 }

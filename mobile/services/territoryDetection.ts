@@ -24,7 +24,7 @@ const EARTH_RADIUS = 6371000;
 const CLOSE_ENOUGH_METERS = 15;
 const MIN_AREA_SQUARE_METERS = 100;
 const MIN_LOOP_POINTS = 4;
-const MAX_ACCURACY_METERS = 40; // Existing mobile rule; backend currently uses 30.
+const MAX_ACCURACY_METERS = 30; // Existing mobile rule; backend currently uses 30.
 const MAX_SPEED_METERS_PER_SECOND = 8;
 const MAX_GAP_SECONDS = 120; // NEW: split routes when GPS is missing for > 2 minutes.
 

@@ -3,6 +3,7 @@ using ILAQA.Data;
 using ILAQA.DTOs;
 using ILAQA.Models;
 using ILAQA.Services;
+using NetTopologySuite.Geometries;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,10 +18,16 @@ namespace ILAQA.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly GpsDistanceService _gpsDistanceService;
-        public RunsController(ApplicationDbContext context, GpsDistanceService gpsDistanceService)
+        private readonly TerritoryDetectionService _territoryDetectionService;
+        private readonly GoogleRoadsService _googleRoadsService;
+        private readonly ILogger<RunsController> _logger;
+        public RunsController(ApplicationDbContext context, GpsDistanceService gpsDistanceService, TerritoryDetectionService territoryDetectionService, GoogleRoadsService googleRoadsService, ILogger<RunsController> logger)
         {
             _context = context;
             _gpsDistanceService = gpsDistanceService;
+            _territoryDetectionService = territoryDetectionService;
+            _googleRoadsService = googleRoadsService;
+            _logger = logger;
         }
 
         [HttpPost("start")]
@@ -273,6 +280,7 @@ namespace ILAQA.Controllers
             if (!alreadyCompleted)
             {
                 var now = DateTime.UtcNow;
+                int addedSeconds = 0;
 
                 if (run.Status == "Running")
                 {
@@ -285,14 +293,43 @@ namespace ILAQA.Controllers
                     if (seconds < 0)
                         return Conflict("Invalid running start time.");
 
-                    run.ActiveSeconds += (int)Math.Floor(seconds);
+                    addedSeconds = (int)Math.Floor(seconds);
                 }
 
-                // Catch any valid loops not yet saved by live GPS uploads.
-                // Existing loops are skipped, so Finish never duplicates them.
-                await SaveNewTerritoriesAsync(runId, userId);
+                // Claims, takeovers and shield renewal happen one at a time
+                // across all runners (FR-20).
+                await _context.Database.ExecuteSqlRawAsync(
+                    "SELECT pg_advisory_xact_lock(7421001)");
+
+                // Territory work may fail on unusual GPS; the run must still
+                // finish and keep its workout (FR-17).
+                await transaction.CreateSavepointAsync("territories");
+                try
+                {
+                    // Catch any valid loops not yet saved by live uploads.
+                    var (_, analysis) =
+                        await SaveNewTerritoriesAsync(runId, userId);
+
+                    // A finished run with 200 m of genuine movement renews
+                    // all of this runner's shields (FR-18).
+                    if (_territoryDetectionService.ShouldRefreshShield(analysis))
+                    {
+                        await RenewShieldsAsync(userId, now);
+                        await _context.SaveChangesAsync();
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex,
+                        "Territory processing failed when finishing run {RunId}.",
+                        runId);
+                    await transaction.RollbackToSavepointAsync("territories");
+                    _context.ChangeTracker.Clear();
+                    run = await _context.Runs.SingleAsync(r => r.Id == runId);
+                }
 
                 // Mark the run as completed.
+                run.ActiveSeconds += addedSeconds;
                 run.EndedAt = now;
                 run.ActiveStartedAt = null;
                 run.Status = "Completed";
@@ -309,6 +346,8 @@ namespace ILAQA.Controllers
                             t.OwnerUserId == userId)
                 .OrderBy(t => t.LoopIndex)
                 .ToListAsync();
+
+            var claimDecisions = await GetClaimDecisionsAsync(runId);
 
             await transaction.CommitAsync();
 
@@ -333,7 +372,8 @@ namespace ILAQA.Controllers
                 run.ValidationStatus,
                 AlreadyCompleted = alreadyCompleted,
                 DetectedTerritoryCount = territories.Count,
-                DetectedTerritories = territories
+                DetectedTerritories = territories,
+                ClaimDecisions = claimDecisions
             });
         }
 
@@ -503,8 +543,26 @@ namespace ILAQA.Controllers
             _context.RunGpsPoints.AddRange(newPoints);
             await _context.SaveChangesAsync();
 
-            // Detect and persist completed loops NOW, while the run is active.
-            var newlyClaimed = await SaveNewTerritoriesAsync(runId, userId);
+            // The GPS points above are always kept. If territory work fails
+            // on unusual GPS, it is logged and retried on the next upload.
+            var newlyClaimed = new List<Territory>();
+            await transaction.CreateSavepointAsync("territories");
+            try
+            {
+                // Move poor GPS points onto the road once.
+                await SnapPoorPointsAsync(runId);
+
+                // Detect and save completed loops now, while the run is active.
+                (newlyClaimed, _) = await SaveNewTerritoriesAsync(runId, userId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex,
+                    "Territory processing failed for upload to run {RunId}.",
+                    runId);
+                await transaction.RollbackToSavepointAsync("territories");
+                _context.ChangeTracker.Clear();
+            }
 
             // Return all confirmed territories, including claims from earlier
             // uploads, so an upload retry can restore the map correctly.
@@ -513,6 +571,8 @@ namespace ILAQA.Controllers
                 .Where(t => t.RunId == runId && t.OwnerUserId == userId)
                 .OrderBy(t => t.LoopIndex)
                 .ToListAsync();
+
+            var claimDecisions = await GetClaimDecisionsAsync(runId);
 
             await transaction.CommitAsync();
 
@@ -533,15 +593,19 @@ namespace ILAQA.Controllers
                         Latitude = c.Y,
                         Longitude = c.X
                     }).ToList()
-                }).ToList()
+                }).ToList(),
+                ClaimDecisions = claimDecisions
             });
         }
 
         // Called only while the caller holds a transaction and a FOR UPDATE
         // lock on the matching Runs row. This makes concurrent upload/finish
         // requests serialize their claims for the same run.
-        private async Task<List<Territory>> SaveNewTerritoriesAsync(
-            Guid runId, string userId)
+        // Every meaningful candidate becomes one TerritoryClaims row with a
+        // status and reason; approved claims also create a Territory and a
+        // "Claimed" TerritoryEvent in the same SaveChanges (UC-06, FR-17).
+        private async Task<(List<Territory> NewTerritories, TerritoryAnalysis Analysis)>
+            SaveNewTerritoriesAsync(Guid runId, string userId)
         {
             var gpsPoints = await _context.RunGpsPoints
                 .AsNoTracking()
@@ -549,47 +613,302 @@ namespace ILAQA.Controllers
                 .OrderBy(p => p.SequenceNo)
                 .ToListAsync();
 
-            var detector = new TerritoryDetectionService(_gpsDistanceService);
-            var polygons = detector.FindTerritories(gpsPoints);
+            var detector = _territoryDetectionService;
+            var analysis = detector.AnalyzeRun(gpsPoints);
 
-            var savedLoopIndexes = await _context.Territories
+            var submittedRanges = await _context.TerritoryClaims
                 .AsNoTracking()
-                .Where(t => t.RunId == runId && t.OwnerUserId == userId)
-                .Select(t => t.LoopIndex)
+                .Where(c => c.RunId == runId)
+                .Select(c => new
+                {
+                    c.StartSequenceNo,
+                    c.EndSequenceNo,
+                    c.ProposedAreaSquareMeters
+                })
                 .ToListAsync();
 
-            var existing = savedLoopIndexes.ToHashSet();
+            var plannedClaims = detector.PlanNewClaims(
+                analysis,
+                submittedRanges
+                    .Select(r => (r.StartSequenceNo, r.EndSequenceNo,
+                        r.ProposedAreaSquareMeters))
+                    .ToList());
+
             var newlyClaimed = new List<Territory>();
+            if (plannedClaims.Count == 0)
+                return (newlyClaimed, analysis);
+
+            // Only one territory claim is processed at a time across all
+            // runners, so overlapping claims can never both win (FR-20).
+            // The lock is released when the caller's transaction ends.
+            await _context.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(7421001)");
+
+            int nextLoopIndex = (await _context.Territories
+                .Where(t => t.RunId == runId)
+                .MaxAsync(t => (int?)t.LoopIndex) ?? 0) + 1;
+
             var now = DateTime.UtcNow;
 
-            for (int i = 0; i < polygons.Count; i++)
+            foreach (var planned in plannedClaims)
             {
-                int loopIndex = i + 1;
-                if (existing.Contains(loopIndex))
-                    continue;
-
-                var polygon = polygons[i];
-                var territory = new Territory
+                var candidate = planned.Candidate;
+                var claim = new TerritoryClaim
                 {
                     RunId = runId,
-                    LoopIndex = loopIndex,
-                    OwnerUserId = userId,
-                    Boundary = polygon,
-                    AreaSquareMeters = detector.CalculateTerritoryArea(polygon),
-                    Status = "Active",
+                    StartSequenceNo = candidate.StartSequenceNo,
+                    EndSequenceNo = candidate.EndSequenceNo,
+                    ProposedBoundary = (Polygon)candidate.Boundary.Copy(),
+                    ProposedAreaSquareMeters = candidate.AreaSquareMeters,
+                    Status = planned.Status,
+                    DecisionReason = planned.DecisionReason,
+                    XpAwarded = 0,
+                    SubmittedAt = now,
+                    DecidedAt = now
+                };
+                _context.TerritoryClaims.Add(claim);
+
+                if (planned.Status == TerritoryClaimStatuses.Approved)
+                {
+                    // Existing land touched by this loop (any owner).
+                    var overlapping = await _context.Territories
+                        .Where(t => (t.Status == "Active" ||
+                                     t.Status == "Vulnerable") &&
+                                    t.Boundary.Intersects(candidate.Boundary))
+                        .ToListAsync();
+
+                    var resolution = detector.ResolveClaim(
+                        candidate.Boundary, userId, overlapping, now);
+
+                    if (resolution.RejectionReason != null)
+                    {
+                        claim.Status = TerritoryClaimStatuses.Rejected;
+                        claim.DecisionReason = resolution.RejectionReason;
+                    }
+                    else
+                    {
+                        claim.NewlyClaimedAreaSquareMeters =
+                            resolution.AwardedAreaSquareMeters;
+
+                        foreach (var piece in resolution.AwardedPieces)
+                        {
+                            var territory = new Territory
+                            {
+                                RunId = runId,
+                                LoopIndex = nextLoopIndex++,
+                                OwnerUserId = userId,
+                                Boundary = (Polygon)piece.Copy(),
+                                AreaSquareMeters =
+                                    detector.CalculateTerritoryArea(piece),
+                                ShieldExpiresAt = now.AddDays(
+                                    TerritoryDetectionService.ShieldDays),
+                                Status = "Active",
+                                CreatedAt = now,
+                                UpdatedAt = now
+                            };
+
+                            claim.ResultTerritoryId ??= territory.Id;
+                            _context.Territories.Add(territory);
+                            _context.TerritoryEvents.Add(new TerritoryEvent
+                            {
+                                TerritoryId = territory.Id,
+                                ClaimId = claim.Id,
+                                NewOwnerUserId = userId,
+                                EventType = TerritoryEventTypes.Claimed,
+                                BoundaryAfter = piece.Copy(),
+                                OccurredAt = now
+                            });
+
+                            newlyClaimed.Add(territory);
+                        }
+
+                        foreach (var takeover in resolution.Takeovers)
+                        {
+                            ApplyTakeover(takeover, claim, userId, now);
+                        }
+                    }
+                }
+
+                // Save each claim so the next one sees its result.
+                await _context.SaveChangesAsync();
+            }
+
+            return (newlyClaimed, analysis);
+        }
+
+        // The rival keeps only what the loop did not cover. Extra pieces
+        // become separate territories with the same owner and shield.
+        private void ApplyTakeover(
+            TerritoryTakeover takeover,
+            TerritoryClaim claim,
+            string newOwnerUserId,
+            DateTime now)
+        {
+            var old = takeover.Territory;
+            var boundaryBefore = old.Boundary.Copy();
+            var remaining = takeover.RemainingPieces
+                .OrderByDescending(piece =>
+                    _territoryDetectionService.CalculateTerritoryArea(piece))
+                .ToList();
+
+            if (remaining.Count == 0)
+            {
+                old.Status = "TakenOver";
+            }
+            else
+            {
+                old.Boundary = (Polygon)remaining[0].Copy();
+                old.AreaSquareMeters =
+                    _territoryDetectionService.CalculateTerritoryArea(remaining[0]);
+            }
+            old.UpdatedAt = now;
+
+            _context.TerritoryEvents.Add(new TerritoryEvent
+            {
+                TerritoryId = old.Id,
+                ClaimId = claim.Id,
+                RelatedTerritoryId = claim.ResultTerritoryId,
+                PreviousOwnerUserId = old.OwnerUserId,
+                NewOwnerUserId = newOwnerUserId,
+                EventType = TerritoryEventTypes.TakenOver,
+                BoundaryBefore = boundaryBefore,
+                BoundaryAfter = remaining.Count == 0
+                    ? null
+                    : remaining[0].Copy(),
+                OccurredAt = now
+            });
+
+            foreach (var piece in remaining.Skip(1))
+            {
+                var split = new Territory
+                {
+                    RunId = null,
+                    LoopIndex = 0,
+                    OwnerUserId = old.OwnerUserId,
+                    Boundary = (Polygon)piece.Copy(),
+                    AreaSquareMeters =
+                        _territoryDetectionService.CalculateTerritoryArea(piece),
+                    ShieldExpiresAt = old.ShieldExpiresAt,
+                    Status = old.Status,
                     CreatedAt = now,
                     UpdatedAt = now
                 };
 
-                _context.Territories.Add(territory);
-                newlyClaimed.Add(territory);
+                _context.Territories.Add(split);
+                _context.TerritoryEvents.Add(new TerritoryEvent
+                {
+                    TerritoryId = split.Id,
+                    ClaimId = claim.Id,
+                    RelatedTerritoryId = old.Id,
+                    PreviousOwnerUserId = old.OwnerUserId,
+                    NewOwnerUserId = old.OwnerUserId,
+                    EventType = TerritoryEventTypes.Split,
+                    BoundaryAfter = piece.Copy(),
+                    OccurredAt = now
+                });
+            }
+        }
+
+        // Renew every shield of this runner for another 3 days. Vulnerable
+        // land becomes protected again (saved by the caller).
+        private async Task RenewShieldsAsync(string userId, DateTime now)
+        {
+            var owned = await _context.Territories
+                .Where(t => t.OwnerUserId == userId &&
+                            (t.Status == "Active" || t.Status == "Vulnerable"))
+                .ToListAsync();
+
+            foreach (var territory in owned)
+            {
+                if (territory.Status == "Vulnerable")
+                {
+                    _context.TerritoryEvents.Add(new TerritoryEvent
+                    {
+                        TerritoryId = territory.Id,
+                        PreviousOwnerUserId = userId,
+                        NewOwnerUserId = userId,
+                        EventType = TerritoryEventTypes.ShieldRestored,
+                        OccurredAt = now
+                    });
+                }
+
+                territory.Status = "Active";
+                territory.ShieldExpiresAt =
+                    now.AddDays(TerritoryDetectionService.ShieldDays);
+                territory.UpdatedAt = now;
+            }
+        }
+
+        // Road-snap poor GPS points of this run that were not checked yet
+        // (FR-12). Each point is sent to Google at most once: a point Google
+        // could not place believably stores its raw position as "checked".
+        private async Task SnapPoorPointsAsync(Guid runId)
+        {
+            if (!_googleRoadsService.IsEnabled)
+                return;
+
+            var points = await _context.RunGpsPoints
+                .Where(p => p.RunId == runId)
+                .OrderBy(p => p.SequenceNo)
+                .ToListAsync();
+
+            var detector = _territoryDetectionService;
+            bool changed = false;
+
+            foreach (var stretch in detector.BuildSnapStretches(points))
+            {
+                var pending = stretch
+                    .Where(p => p.SnappedLatitude == null &&
+                                p.AccuracyMeters >
+                                    TerritoryDetectionService.SnapAccuracyThresholdMeters &&
+                                p.AccuracyMeters <= 30)
+                    .ToList();
+
+                if (pending.Count == 0)
+                    continue;
+
+                var roadPoints = await _googleRoadsService.SnapAsync(stretch);
+                var result = detector.ApplySnappedPoints(stretch, roadPoints);
+
+                foreach (var point in pending)
+                {
+                    var placed = result.Single(r => r.SequenceNo == point.SequenceNo);
+                    point.SnappedLatitude = placed.Latitude;
+                    point.SnappedLongitude = placed.Longitude;
+                    changed = true;
+                }
             }
 
-            if (newlyClaimed.Count > 0)
+            if (changed)
                 await _context.SaveChangesAsync();
-
-            return newlyClaimed;
         }
+
+        // Every claim decision for a run, including rejection reasons (FR-17).
+        private async Task<List<ClaimDecision>> GetClaimDecisionsAsync(
+            Guid runId)
+        {
+            return await _context.TerritoryClaims
+                .AsNoTracking()
+                .Where(c => c.RunId == runId)
+                .OrderBy(c => c.StartSequenceNo)
+                .ThenBy(c => c.EndSequenceNo)
+                .Select(c => new ClaimDecision(
+                    c.StartSequenceNo,
+                    c.EndSequenceNo,
+                    c.Status,
+                    c.DecisionReason,
+                    Math.Round(c.ProposedAreaSquareMeters, 2),
+                    c.ResultTerritoryId))
+                .ToListAsync();
+        }
+
+        public sealed record ClaimDecision(
+            int StartSequenceNo,
+            int EndSequenceNo,
+            string Status,
+            string? DecisionReason,
+            double AreaSquareMeters,
+            Guid? TerritoryId);
 
 
         [HttpGet("routes")]
@@ -618,19 +937,21 @@ namespace ILAQA.Controllers
             {
                 RunId = run.Id,
                 StartedAt = run.StartedAt,
-                Legs = points
-                    .Where(p => p.RunId == run.Id)
-                    .GroupBy(p => p.LegNo)
-                    .Select(leg => new
+                // Cleaned lines: no GPS teleports or bad fixes, road-snapped
+                // where GPS was poor, split where GPS was missing.
+                Legs = _territoryDetectionService
+                    .BuildDisplayRoute(points
+                        .Where(p => p.RunId == run.Id)
+                        .ToList())
+                    .Select((line, index) => new
                     {
-                        LegNo = leg.Key,
-                        Coordinates = leg.Select(p => new
+                        LegNo = index + 1,
+                        Coordinates = line.Select(p => new
                         {
                             Latitude = p.Latitude,
                             Longitude = p.Longitude
                         }).ToList()
                     })
-                    .Where(leg => leg.Coordinates.Count >= 2)
                     .ToList()
             })
             .Where(run => run.Legs.Count > 0)
@@ -638,26 +959,57 @@ namespace ILAQA.Controllers
 
             return Ok(routes);
         }
+        
         [HttpGet("territories")]
-        public async Task<IActionResult> GetMyTerritories()
+        public async Task<IActionResult> GetMapTerritories()
         {
-            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var viewerUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
-            if (string.IsNullOrWhiteSpace(userId))
+            if (string.IsNullOrWhiteSpace(viewerUserId))
                 return Unauthorized();
 
-            var territories = await _context.Territories
-                .AsNoTracking()
-                .Where(t => t.OwnerUserId == userId && t.Status == "Active")
-                .OrderByDescending(t => t.CreatedAt)
+            // Only the owner columns the map needs (never password data).
+            var rows = await (
+                from t in _context.Territories.AsNoTracking()
+                where t.Status == "Active" || t.Status == "Vulnerable"
+                join u in _context.Users on t.OwnerUserId equals u.Id
+                join r in _context.Runs on t.RunId equals (Guid?)r.Id into runs
+                from r in runs.DefaultIfEmpty()
+                orderby t.CreatedAt descending
+                select new
+                {
+                    Territory = t,
+                    Owner = new ApplicationUser
+                    {
+                        Id = u.Id,
+                        UserName = u.UserName,
+                        DisplayName = u.DisplayName,
+                        IsProfilePublic = u.IsProfilePublic
+                    },
+                    RunStatus = r == null ? null : r.Status
+                })
                 .ToListAsync();
 
-            return Ok(territories.Select(t => new
+            // Other runners' new land appears only after their run ends.
+            rows = rows
+                .Where(row => TerritoryDetectionService.IsVisibleOnMap(
+                    row.Owner.Id, row.RunStatus, viewerUserId))
+                .ToList();
+
+            var now = DateTime.UtcNow;
+
+            // Private runners appear as "Anonymous profile" (FR-21).
+            return Ok(rows.Select(row => new
             {
-                TerritoryId = t.Id,
-                RunId = t.RunId,
-                AreaSquareMeters = Math.Round(t.AreaSquareMeters, 2),
-                Boundary = t.Boundary.Coordinates.Select(c => new
+                TerritoryId = row.Territory.Id,
+                AreaSquareMeters = Math.Round(row.Territory.AreaSquareMeters, 2),
+                ColorHex = TerritoryDetectionService.OwnerColor(row.Owner.Id),
+                OwnerLabel = TerritoryDetectionService.OwnerLabel(
+                    row.Owner, viewerUserId),
+                IsMine = row.Owner.Id == viewerUserId,
+                IsShielded = TerritoryDetectionService.IsShielded(
+                    row.Territory, now),
+                Boundary = row.Territory.Boundary.Coordinates.Select(c => new
                 {
                     Latitude = c.Y,
                     Longitude = c.X

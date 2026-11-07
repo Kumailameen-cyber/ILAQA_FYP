@@ -105,13 +105,16 @@ builder.Services
                     return;
                 }
 
-                var userManager = context.HttpContext.RequestServices
-                    .GetRequiredService<UserManager<ApplicationUser>>();
+                var db = context.HttpContext.RequestServices
+    .GetRequiredService<ApplicationDbContext>();
 
-                var user = await userManager.FindByIdAsync(userId);
+                var activeSessionId = await db.Users
+                    .AsNoTracking()
+                    .Where(u => u.Id == userId)
+                    .Select(u => u.ActiveSessionId)
+                    .SingleOrDefaultAsync();
 
-                if (user == null ||
-                    user.ActiveSessionId != tokenSessionId)
+                if (activeSessionId != tokenSessionId)
                 {
                     context.Fail("Session expired or replaced.");
                     return;
@@ -124,8 +127,14 @@ builder.Services.AddScoped<OtpService>();
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<GpsDistanceService>();
+builder.Services.AddScoped<TerritoryDetectionService>();
+builder.Services.AddHttpClient<GoogleRoadsService>(client =>
+    client.Timeout = TimeSpan.FromSeconds(5))
+    // The request URL contains the Google key: never log it.
+    .RemoveAllLoggers();
 builder.Services.AddScoped<EmailService>();
 builder.Services.AddHostedService<PendingRegistrationCleanupService>();
+builder.Services.AddHostedService<TerritoryInactivityService>();
 // Add services to the container.
 
 builder.Services.AddRateLimiter(options =>
@@ -142,14 +151,22 @@ builder.Services.AddRateLimiter(options =>
             partitionKey: clientIp,
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 10,
+                PermitLimit = builder.Environment.IsDevelopment() ? 60 : 10,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true
             });
     });
 });
-
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("DevelopmentCors", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -195,8 +212,17 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+if (app.Environment.IsDevelopment())
+{
+    // Allow local Android testing over HTTP.
+    app.UseCors("DevelopmentCors");
+}
+else
+{
+    // Keep HTTPS redirection in production.
+    app.UseHttpsRedirection();
+}
 
-app.UseHttpsRedirection();
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();

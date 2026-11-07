@@ -39,7 +39,9 @@ async function renewAccessToken(): Promise<string> {
       await SecureStore.setItemAsync('accessToken', data.accessToken);
       await SecureStore.setItemAsync('refreshToken', data.refreshToken);
       return data.accessToken as string;
-    })().finally(() => { refreshInFlight = null; });
+    })().finally(() => {
+      refreshInFlight = null;
+    });
   }
   return refreshInFlight;
 }
@@ -48,14 +50,15 @@ async function postJson(path: string, body?: unknown): Promise<any> {
   let token = await SecureStore.getItemAsync('accessToken');
   if (!token) token = await renewAccessToken();
 
-  const send = (authToken: string) => fetch(`${API_URL}${path}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${authToken}`,
-      'Content-Type': 'application/json',
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  const send = (authToken: string) =>
+    fetch(`${API_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        'Content-Type': 'application/json',
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
 
   let response = await send(token);
   if (response.status === 401) {
@@ -64,7 +67,9 @@ async function postJson(path: string, body?: unknown): Promise<any> {
   }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
-    throw new Error(`Run sync failed (HTTP ${response.status}): ${detail.slice(0, 180)}`);
+    throw new Error(
+      `Run sync failed (HTTP ${response.status}): ${detail.slice(0, 180)}`
+    );
   }
   return response.json();
 }
@@ -73,14 +78,21 @@ async function syncOnce(runId: string): Promise<SyncResult> {
   const initial = await getRunSyncRecord(runId);
   if (!initial) throw new Error('Run is missing from the local sync queue.');
   if (initial.serverEnded) {
-    return { newlyClaimedCount: 0, confirmedTerritories: [], serverEnded: true };
+    return {
+      newlyClaimedCount: 0,
+      confirmedTerritories: [],
+      serverEnded: true,
+    };
   }
 
-  // Idempotent: retrying the same RunId + StartedAt is safe.
-  await postJson('/api/runs/start', {
-    runId,
-    startedAt: initial.startedAt,
-  });
+  // If points were already uploaded, the server has created this run.
+  // Otherwise, safely retry /start.
+  if (initial.uploadedThroughId === 0) {
+    await postJson('/api/runs/start', {
+      runId,
+      startedAt: initial.startedAt,
+    });
+  }
 
   let lastUploadedId = initial.uploadedThroughId;
   let totalNewClaims = 0;
@@ -91,14 +103,17 @@ async function syncOnce(runId: string): Promise<SyncResult> {
     const batch = await getUnuploadedRunPoints(runId, lastUploadedId, 100);
     if (batch.length === 0) break;
 
-    const response = await postJson(`/api/runs/${runId}/points`, batch.map((p) => ({
-      sequenceNo: p.id,
-      legNo: p.legNo,
-      latitude: p.latitude,
-      longitude: p.longitude,
-      accuracyMeters: p.accuracy,
-      recordedAt: new Date(p.timestamp).toISOString(),
-    })));
+    const response = await postJson(
+      `/api/runs/${runId}/points`,
+      batch.map((p) => ({
+        sequenceNo: p.id,
+        legNo: p.legNo,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        accuracyMeters: p.accuracy,
+        recordedAt: new Date(p.timestamp).toISOString(),
+      }))
+    );
 
     // Advance the cursor ONLY after the server has acknowledged this batch.
     lastUploadedId = batch[batch.length - 1].id;
@@ -106,7 +121,11 @@ async function syncOnce(runId: string): Promise<SyncResult> {
     totalNewClaims += Number(response.newlyClaimedCount ?? 0);
     if (Array.isArray(response.confirmedTerritories)) {
       confirmedTerritories = response.confirmedTerritories;
-      await cacheConfirmedTerritories(initial.ownerUserId, runId, confirmedTerritories);
+      await cacheConfirmedTerritories(
+        initial.ownerUserId,
+        runId,
+        confirmedTerritories
+      );
     }
   }
 
@@ -116,15 +135,25 @@ async function syncOnce(runId: string): Promise<SyncResult> {
     const response = await postJson(`/api/runs/${runId}/end`);
     if (Array.isArray(response.detectedTerritories)) {
       confirmedTerritories = response.detectedTerritories;
-      await cacheConfirmedTerritories(initial.ownerUserId, runId, confirmedTerritories);
+      await cacheConfirmedTerritories(
+        initial.ownerUserId,
+        runId,
+        confirmedTerritories
+      );
     }
     await markServerRunEnded(runId);
-    return { newlyClaimedCount: totalNewClaims,
-      confirmedTerritories, serverEnded: true };
+    return {
+      newlyClaimedCount: totalNewClaims,
+      confirmedTerritories,
+      serverEnded: true,
+    };
   }
 
-  return { newlyClaimedCount: totalNewClaims,
-    confirmedTerritories, serverEnded: false };
+  return {
+    newlyClaimedCount: totalNewClaims,
+    confirmedTerritories,
+    serverEnded: false,
+  };
 }
 
 // One sync at a time per run in the main JS runtime.
@@ -139,7 +168,9 @@ export async function syncRun(runId: string): Promise<SyncResult> {
     }
     return result;
   }
-  const work = syncOnce(runId).finally(() => { syncing.delete(runId); });
+  const work = syncOnce(runId).finally(() => {
+    syncing.delete(runId);
+  });
   syncing.set(runId, work);
   return work;
 }

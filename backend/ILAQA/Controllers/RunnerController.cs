@@ -134,20 +134,7 @@ namespace ILAQA.Controllers
                 });
             }
 
-            var allowedTypes = new[]
-            {
-        "image/jpeg",
-        "image/png",
-        "image/webp"
-    };
-
-            if (!allowedTypes.Contains(file.ContentType.ToLowerInvariant()))
-            {
-                return BadRequest(new
-                {
-                    message = "Only JPEG, PNG and WebP images are allowed."
-                });
-            }
+           
 
             await using var stream = file.OpenReadStream();
 
@@ -197,15 +184,25 @@ namespace ILAQA.Controllers
                 header[10] == 0x42 &&
                 header[11] == 0x50;
 
-            bool validSignature = file.ContentType.ToLowerInvariant() switch
-            {
-                "image/jpeg" => isJpeg,
-                "image/png" => isPng,
-                "image/webp" => isWebp,
-                _ => false
-            };
+            string? detectedContentType =
+        isJpeg ? "image/jpeg" :
+        isPng ? "image/png" :
+        isWebp ? "image/webp" :
+        null;
 
-            if (!validSignature)
+            if (detectedContentType == null)
+            {
+                return BadRequest(new
+                {
+                    message = "Only valid JPEG, PNG and WebP images are allowed."
+                });
+            }
+
+            var receivedContentType = file.ContentType?.ToLowerInvariant();
+
+            if (receivedContentType != detectedContentType &&
+                receivedContentType != "application/octet-stream" &&
+                !string.IsNullOrWhiteSpace(receivedContentType))
             {
                 return BadRequest(new
                 {
@@ -219,10 +216,7 @@ namespace ILAQA.Controllers
 
             try
             {
-                imageUrl = await _storageService.UploadProfilePictureAsync(
-                    stream,
-                    file.ContentType.ToLowerInvariant(),
-                    user.Id);
+                imageUrl = await _storageService.UploadProfilePictureAsync( stream,  detectedContentType, user.Id);
             }
             catch (HttpRequestException)
             {
@@ -525,3 +519,5 @@ namespace ILAQA.Controllers
 
     }
 }
+
+

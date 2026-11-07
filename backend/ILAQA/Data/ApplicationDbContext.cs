@@ -26,6 +26,8 @@ namespace ILAQA.Data
         public DbSet<RunGpsPoint> RunGpsPoints { get; set; }
 
         public DbSet<Territory> Territories { get; set; }
+        public DbSet<TerritoryClaim> TerritoryClaims { get; set; }
+        public DbSet<TerritoryEvent> TerritoryEvents { get; set; }
         protected override void OnModelCreating(
             ModelBuilder builder)
         {
@@ -123,6 +125,86 @@ namespace ILAQA.Data
                       .HasMethod("gist");
                 entity.Property(t => t.Status)
       .HasMaxLength(20);
+            });
+
+            builder.Entity<TerritoryClaim>(entity =>
+            {
+                entity.HasOne<Run>()
+                      .WithMany()
+                      .HasForeignKey(c => c.RunId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne<Territory>()
+                      .WithMany()
+                      .HasForeignKey(c => c.ResultTerritoryId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                // ERD index.
+                entity.HasIndex(c => new { c.RunId, c.SubmittedAt });
+
+                // Fast lookup of a run's earlier decisions. Not unique: two
+                // different areas can share a GPS range. Duplicates are
+                // prevented by the planner under the run's row lock.
+                entity.HasIndex(c => new
+                {
+                    c.RunId,
+                    c.StartSequenceNo,
+                    c.EndSequenceNo
+                });
+
+                entity.Property(c => c.ProposedBoundary)
+                      .HasColumnType("geometry(Polygon,4326)");
+
+                entity.Property(c => c.Status)
+                      .HasMaxLength(20);
+
+                entity.Property(c => c.SubmittedAt)
+                      .HasColumnType("timestamp with time zone");
+
+                entity.Property(c => c.DecidedAt)
+                      .HasColumnType("timestamp with time zone");
+            });
+
+            builder.Entity<TerritoryEvent>(entity =>
+            {
+                entity.HasOne<Territory>()
+                      .WithMany()
+                      .HasForeignKey(e => e.TerritoryId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne<TerritoryClaim>()
+                      .WithMany()
+                      .HasForeignKey(e => e.ClaimId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne<Territory>()
+                      .WithMany()
+                      .HasForeignKey(e => e.RelatedTerritoryId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne<ApplicationUser>()
+                      .WithMany()
+                      .HasForeignKey(e => e.PreviousOwnerUserId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasOne<ApplicationUser>()
+                      .WithMany()
+                      .HasForeignKey(e => e.NewOwnerUserId)
+                      .OnDelete(DeleteBehavior.Restrict);
+
+                entity.HasIndex(e => new { e.TerritoryId, e.OccurredAt });
+
+                entity.Property(e => e.EventType)
+                      .HasMaxLength(30);
+
+                entity.Property(e => e.BoundaryBefore)
+                      .HasColumnType("geometry(Geometry,4326)");
+
+                entity.Property(e => e.BoundaryAfter)
+                      .HasColumnType("geometry(Geometry,4326)");
+
+                entity.Property(e => e.OccurredAt)
+                      .HasColumnType("timestamp with time zone");
             });
         }
     }
