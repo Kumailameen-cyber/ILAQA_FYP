@@ -17,6 +17,11 @@ export type ConfirmedTerritory = {
   loopIndex?: number;
   areaSquareMeters: number;
   boundary: { latitude: number; longitude: number }[];
+  // From GET /api/runs/territories (map view).
+  colorHex?: string;
+  ownerLabel?: string;
+  isMine?: boolean;
+  isShielded?: boolean;
 };
 
 export type RunSyncRecord = {
@@ -26,13 +31,17 @@ export type RunSyncRecord = {
   uploadedThroughId: number;
   finishRequested: number;
   serverEnded: number;
+  // When Finish was pressed and the running time, sent with /end.
+  endedAt: string | null;
+  activeSeconds: number | null;
 };
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 let initializationPromise: Promise<void> | null = null;
 
 async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
-  if (!databasePromise) databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME);
+  if (!databasePromise)
+    databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME);
   return databasePromise;
 }
 
@@ -72,6 +81,17 @@ export async function initializeRunStorage(): Promise<void> {
           'ALTER TABLE active_run ADD COLUMN current_leg INTEGER NOT NULL DEFAULT 1;'
         );
       }
+      // Run timer, so a run survives tab switches and app restarts.
+      if (!activeColumns.some((col) => col.name === 'active_ms_before')) {
+        await db.execAsync(
+          'ALTER TABLE active_run ADD COLUMN active_ms_before INTEGER NOT NULL DEFAULT 0;'
+        );
+      }
+      if (!activeColumns.some((col) => col.name === 'segment_started_at')) {
+        await db.execAsync(
+          'ALTER TABLE active_run ADD COLUMN segment_started_at INTEGER;'
+        );
+      }
 
       const gpsColumns = await db.getAllAsync<{ name: string }>(
         'PRAGMA table_info(gps_points)'
@@ -105,6 +125,19 @@ export async function initializeRunStorage(): Promise<void> {
         CREATE INDEX IF NOT EXISTS idx_confirmed_territories_owner
           ON confirmed_territories (owner_user_id);
       `);
+
+      // Finish time and active seconds sent with /end (offline-safe).
+      const syncColumns = await db.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(run_sync)'
+      );
+      if (!syncColumns.some((col) => col.name === 'ended_at')) {
+        await db.execAsync('ALTER TABLE run_sync ADD COLUMN ended_at TEXT;');
+      }
+      if (!syncColumns.some((col) => col.name === 'active_seconds')) {
+        await db.execAsync(
+          'ALTER TABLE run_sync ADD COLUMN active_seconds INTEGER;'
+        );
+      }
     })().catch((error) => {
       initializationPromise = null;
       throw error;
@@ -133,8 +166,18 @@ export async function saveGpsPoint(
          SELECT 1 FROM gps_points
          WHERE run_id = ? AND latitude = ? AND longitude = ? AND timestamp = ?
        )`,
-    [runId, latitude, longitude, accuracy, timestamp, runId,
-      runId, latitude, longitude, timestamp]
+    [
+      runId,
+      latitude,
+      longitude,
+      accuracy,
+      timestamp,
+      runId,
+      runId,
+      latitude,
+      longitude,
+      timestamp,
+    ]
   );
 }
 
@@ -162,15 +205,73 @@ export async function getRunPoints(runId: string): Promise<StoredGpsPoint[]> {
   );
 }
 
+// Starts tracking a new run. Never replaces another unfinished run: that
+// run would lose its Finish and stay "Running" on the server.
 export async function setActiveRun(runId: string): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
+  const existing = await getActiveRunId();
+  if (existing && existing !== runId) {
+    throw new Error('Another run is still active.');
+  }
   await db.runAsync(
-    `INSERT INTO active_run (id, run_id, is_recording, current_leg)
-     VALUES (1, ?, 0, 1)
+    `INSERT INTO active_run
+       (id, run_id, is_recording, current_leg, active_ms_before, segment_started_at)
+     VALUES (1, ?, 0, 1, 0, NULL)
      ON CONFLICT(id) DO UPDATE SET
-       run_id = excluded.run_id, is_recording = 0, current_leg = 1`,
+       run_id = excluded.run_id, is_recording = 0, current_leg = 1,
+       active_ms_before = 0, segment_started_at = NULL`,
     [runId]
+  );
+}
+
+export type ActiveRunState = {
+  runId: string;
+  isRecording: boolean;
+  currentLeg: number;
+  // Running time of finished segments, in milliseconds.
+  activeMsBefore: number;
+  // When the current running segment started (ms), null while paused.
+  segmentStartedAt: number | null;
+};
+
+export async function getActiveRunState(): Promise<ActiveRunState | null> {
+  await initializeRunStorage();
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{
+    runId: string;
+    isRecording: number;
+    currentLeg: number;
+    activeMsBefore: number;
+    segmentStartedAt: number | null;
+  }>(
+    `SELECT run_id AS runId, is_recording AS isRecording,
+       current_leg AS currentLeg, active_ms_before AS activeMsBefore,
+       segment_started_at AS segmentStartedAt
+     FROM active_run WHERE id = 1`
+  );
+  if (!row) return null;
+  return {
+    runId: row.runId,
+    isRecording: row.isRecording === 1,
+    currentLeg: row.currentLeg,
+    activeMsBefore: row.activeMsBefore ?? 0,
+    segmentStartedAt: row.segmentStartedAt ?? null,
+  };
+}
+
+// Saves the run timer so it can be restored after a tab switch or restart.
+export async function saveRunTiming(
+  runId: string,
+  activeMsBefore: number,
+  segmentStartedAt: number | null
+): Promise<void> {
+  await initializeRunStorage();
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE active_run SET active_ms_before = ?, segment_started_at = ?
+     WHERE run_id = ?`,
+    [Math.max(0, Math.round(activeMsBefore)), segmentStartedAt, runId]
   );
 }
 
@@ -184,14 +285,15 @@ export async function getActiveRunId(): Promise<string | null> {
 }
 
 export async function setRunRecording(
-  runId: string, isRecording: boolean
+  runId: string,
+  isRecording: boolean
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
-  await db.runAsync(
-    'UPDATE active_run SET is_recording = ? WHERE run_id = ?',
-    [isRecording ? 1 : 0, runId]
-  );
+  await db.runAsync('UPDATE active_run SET is_recording = ? WHERE run_id = ?', [
+    isRecording ? 1 : 0,
+    runId,
+  ]);
 }
 
 export async function clearActiveRun(): Promise<void> {
@@ -203,7 +305,9 @@ export async function clearActiveRun(): Promise<void> {
 // ==== Offline-safe upload queue (new) ====
 
 export async function registerRunForSync(
-  runId: string, ownerUserId: string, startedAt: string
+  runId: string,
+  ownerUserId: string,
+  startedAt: string
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -223,7 +327,8 @@ export async function getRunSyncRecord(
   const row = await db.getFirstAsync<RunSyncRecord>(
     `SELECT run_id AS runId, owner_user_id AS ownerUserId,
        started_at AS startedAt, uploaded_through_id AS uploadedThroughId,
-       finish_requested AS finishRequested, server_ended AS serverEnded
+       finish_requested AS finishRequested, server_ended AS serverEnded,
+       ended_at AS endedAt, active_seconds AS activeSeconds
      FROM run_sync WHERE run_id = ?`,
     [runId]
   );
@@ -242,7 +347,9 @@ export async function getPendingRunIds(ownerUserId: string): Promise<string[]> {
 }
 
 export async function getUnuploadedRunPoints(
-  runId: string, uploadedThroughId: number, limit = 100
+  runId: string,
+  uploadedThroughId: number,
+  limit = 100
 ): Promise<StoredGpsPoint[]> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -256,7 +363,8 @@ export async function getUnuploadedRunPoints(
 }
 
 export async function markPointsUploaded(
-  runId: string, throughId: number
+  runId: string,
+  throughId: number
 ): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
@@ -268,22 +376,33 @@ export async function markPointsUploaded(
   );
 }
 
-export async function markRunFinishRequested(runId: string): Promise<void> {
+// endedAt/activeSeconds are kept from the first Finish if it is repeated.
+export async function markRunFinishRequested(
+  runId: string,
+  endedAt?: string,
+  activeSeconds?: number
+): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
   await db.runAsync(
-    'UPDATE run_sync SET finish_requested = 1 WHERE run_id = ?',
-    [runId]
+    `UPDATE run_sync SET finish_requested = 1,
+       ended_at = COALESCE(ended_at, ?),
+       active_seconds = COALESCE(active_seconds, ?)
+     WHERE run_id = ?`,
+    [
+      endedAt ?? null,
+      activeSeconds === undefined ? null : Math.max(0, Math.floor(activeSeconds)),
+      runId,
+    ]
   );
 }
 
 export async function markServerRunEnded(runId: string): Promise<void> {
   await initializeRunStorage();
   const db = await getDatabase();
-  await db.runAsync(
-    'UPDATE run_sync SET server_ended = 1 WHERE run_id = ?',
-    [runId]
-  );
+  await db.runAsync('UPDATE run_sync SET server_ended = 1 WHERE run_id = ?', [
+    runId,
+  ]);
 }
 
 export async function cacheConfirmedTerritories(
@@ -304,9 +423,14 @@ export async function cacheConfirmedTerritories(
          loop_index = excluded.loop_index,
          area_square_meters = excluded.area_square_meters,
          boundary_json = excluded.boundary_json`,
-      [territory.territoryId, runId, ownerUserId,
-        territory.loopIndex ?? null, territory.areaSquareMeters,
-        JSON.stringify(territory.boundary)]
+      [
+        territory.territoryId,
+        runId,
+        ownerUserId,
+        territory.loopIndex ?? null,
+        territory.areaSquareMeters,
+        JSON.stringify(territory.boundary),
+      ]
     );
   }
 }
@@ -332,14 +456,40 @@ export async function getConfirmedTerritories(
     try {
       const boundary = JSON.parse(row.boundaryJson);
       if (!Array.isArray(boundary) || boundary.length < 4) return [];
-      return [{
-        territoryId: row.territoryId,
-        loopIndex: row.loopIndex ?? undefined,
-        areaSquareMeters: row.areaSquareMeters,
-        boundary,
-      }];
+      return [
+        {
+          territoryId: row.territoryId,
+          loopIndex: row.loopIndex ?? undefined,
+          areaSquareMeters: row.areaSquareMeters,
+          boundary,
+        },
+      ];
     } catch {
       return [];
     }
   });
+}
+
+export async function inspectSavedRuns() {
+  await initializeRunStorage();
+  const db = await getDatabase();
+
+  return db.getAllAsync<{
+    runId: string;
+    pointCount: number;
+    firstTimestamp: number;
+    lastTimestamp: number;
+    hasSyncRecord: number;
+  }>(`
+    SELECT
+      p.run_id AS runId,
+      COUNT(*) AS pointCount,
+      MIN(p.timestamp) AS firstTimestamp,
+      MAX(p.timestamp) AS lastTimestamp,
+      CASE WHEN s.run_id IS NULL THEN 0 ELSE 1 END AS hasSyncRecord
+    FROM gps_points p
+    LEFT JOIN run_sync s ON s.run_id = p.run_id
+    GROUP BY p.run_id
+    ORDER BY lastTimestamp DESC
+  `);
 }

@@ -3,8 +3,11 @@ using ILAQA.Data;
 using ILAQA.DTOs;
 using ILAQA.Models;
 using ILAQA.Services;
+using NetTopologySuite.Geometries;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -17,10 +20,22 @@ namespace ILAQA.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly GpsDistanceService _gpsDistanceService;
-        public RunsController(ApplicationDbContext context, GpsDistanceService gpsDistanceService)
+        private readonly TerritoryDetectionService _territoryDetectionService;
+        private readonly TerritoryClaimService _territoryClaimService;
+        private readonly ILogger<RunsController> _logger;
+
+        public RunsController(
+            ApplicationDbContext context,
+            GpsDistanceService gpsDistanceService,
+            TerritoryDetectionService territoryDetectionService,
+            TerritoryClaimService territoryClaimService,
+            ILogger<RunsController> logger)
         {
             _context = context;
             _gpsDistanceService = gpsDistanceService;
+            _territoryDetectionService = territoryDetectionService;
+            _territoryClaimService = territoryClaimService;
+            _logger = logger;
         }
 
         [HttpPost("start")]
@@ -210,6 +225,18 @@ namespace ILAQA.Controllers
             if (run == null)
                 return NotFound("Run not found.");
 
+            // Pausing an already paused run returns its current state
+            // (UC-02 alternate flow: idempotent result, e.g. on a retry).
+            if (run.Status == "Paused")
+            {
+                return Ok(new
+                {
+                    run.Id,
+                    run.Status,
+                    run.ActiveSeconds
+                });
+            }
+
             if (run.Status != "Running")
                 return Conflict("Only a running session can be paused.");
 
@@ -240,7 +267,10 @@ namespace ILAQA.Controllers
 
 
         [HttpPost("{runId:guid}/end")]
-        public async Task<IActionResult> EndRun(Guid runId)
+        public async Task<IActionResult> EndRun(
+            Guid runId,
+            [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)]
+            EndRunRequest? request = null)
         {
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -269,10 +299,32 @@ namespace ILAQA.Controllers
                 return Conflict("This run cannot be completed.");
             }
 
+            // A finished run whose territory processing failed is retried
+            // safely: claims already saved are never repeated (UC-05/UC-07).
+            if (alreadyCompleted &&
+                run.ValidationStatus == RunValidationStatuses.Failed)
+            {
+                var retryNow = DateTime.UtcNow;
+                var retry = await _territoryClaimService.ProcessFinishedRunAsync(
+                    transaction, runId, userId, run.EndedAt ?? retryNow, retryNow);
+
+                if (!retry.Succeeded)
+                    run = await _context.Runs.SingleAsync(r => r.Id == runId);
+
+                run.ValidationStatus =
+                    TerritoryDetectionService.DecideValidationStatus(
+                        retry.Succeeded, retry.ApprovedClaimCount);
+
+                if (retry.Analysis != null)
+                    run.TotalDistanceMeters = retry.Analysis.GenuineDistanceMeters;
+                await _context.SaveChangesAsync();
+            }
+
             // Process territories only the first time the run ends.
             if (!alreadyCompleted)
             {
                 var now = DateTime.UtcNow;
+                int addedSeconds = 0;
 
                 if (run.Status == "Running")
                 {
@@ -285,18 +337,51 @@ namespace ILAQA.Controllers
                     if (seconds < 0)
                         return Conflict("Invalid running start time.");
 
-                    run.ActiveSeconds += (int)Math.Floor(seconds);
+                    addedSeconds = (int)Math.Floor(seconds);
                 }
 
-                // Catch any valid loops not yet saved by live GPS uploads.
-                // Existing loops are skipped, so Finish never duplicates them.
-                await SaveNewTerritoriesAsync(runId, userId);
+                // The phone's end time and active time (also for a Finish
+                // pressed offline and synced later), checked against the
+                // stored GPS legs (UC-02).
+                var legFixes = await _context.RunGpsPoints
+                    .AsNoTracking()
+                    .Where(p => p.RunId == runId)
+                    .Select(p => new RunGpsPoint
+                    {
+                        SequenceNo = p.SequenceNo,
+                        LegNo = p.LegNo,
+                        RecordedAt = p.RecordedAt
+                    })
+                    .ToListAsync();
+
+                var timing = TerritoryDetectionService.ResolveFinishTiming(
+                    run.StartedAt, now, run.ActiveSeconds + addedSeconds,
+                    request?.EndedAt, request?.ActiveSeconds, legFixes);
+
+                // Territory work may fail on unusual GPS; the run must still
+                // finish and keep its workout (FR-17). A failure is recorded
+                // as Failed and retried later. Shields count from the run's
+                // real end.
+                var processing = await _territoryClaimService.ProcessFinishedRunAsync(
+                    transaction, runId, userId, timing.EndedAt, now);
+
+                if (!processing.Succeeded)
+                    run = await _context.Runs.SingleAsync(r => r.Id == runId);
 
                 // Mark the run as completed.
-                run.EndedAt = now;
+                run.ActiveSeconds = timing.ActiveSeconds;
+                run.EndedAt = timing.EndedAt;
                 run.ActiveStartedAt = null;
                 run.Status = "Completed";
-                run.ValidationStatus = "Pending";
+                run.ValidationStatus =
+                    TerritoryDetectionService.DecideValidationStatus(
+                        processing.Succeeded, processing.ApprovedClaimCount);
+
+                // Official distance: cleaned walking/running distance (no
+                // GPS teleports or bad fixes); 0 for vehicle-speed runs.
+                if (processing.Analysis != null)
+                    run.TotalDistanceMeters =
+                        processing.Analysis.GenuineDistanceMeters;
 
                 // Save the run and claimed territories together.
                 await _context.SaveChangesAsync();
@@ -309,6 +394,29 @@ namespace ILAQA.Controllers
                             t.OwnerUserId == userId)
                 .OrderBy(t => t.LoopIndex)
                 .ToListAsync();
+
+            // Report only land won by this run: a piece merged into another
+            // piece of this same run is already inside that piece. Pieces
+            // merged into older land are still reported on their own.
+            var mergedInto = savedTerritories
+                .Where(t => t.MergedIntoTerritoryId != null)
+                .Select(t => t.MergedIntoTerritoryId!.Value)
+                .ToList();
+            if (mergedInto.Count > 0)
+            {
+                var survivorsFromThisRun = await _context.Territories
+                    .Where(t => mergedInto.Contains(t.Id) && t.RunId == runId)
+                    .Select(t => t.Id)
+                    .ToListAsync();
+
+                savedTerritories = savedTerritories
+                    .Where(t => t.MergedIntoTerritoryId == null ||
+                                !survivorsFromThisRun.Contains(
+                                    t.MergedIntoTerritoryId.Value))
+                    .ToList();
+            }
+
+            var claimDecisions = await GetClaimDecisionsAsync(runId);
 
             await transaction.CommitAsync();
 
@@ -333,7 +441,8 @@ namespace ILAQA.Controllers
                 run.ValidationStatus,
                 AlreadyCompleted = alreadyCompleted,
                 DetectedTerritoryCount = territories.Count,
-                DetectedTerritories = territories
+                DetectedTerritories = territories,
+                ClaimDecisions = claimDecisions
             });
         }
 
@@ -353,6 +462,19 @@ namespace ILAQA.Controllers
 
             if (run == null)
                 return NotFound("Run not found.");
+
+            // Resuming a run that is already running returns its current
+            // state (UC-02 alternate flow: idempotent result).
+            if (run.Status == "Running")
+            {
+                return Ok(new
+                {
+                    run.Id,
+                    run.Status,
+                    run.ActiveStartedAt,
+                    run.ActiveSeconds
+                });
+            }
 
             // Only paused runs can be resumed.
             if (run.Status != "Paused")
@@ -381,6 +503,7 @@ namespace ILAQA.Controllers
         }
 
         [HttpPost("{runId:guid}/points")]
+        [EnableRateLimiting(GpsUploadRateLimit.PolicyName)]
         public async Task<IActionResult> UploadGpsPoints(
             Guid runId,
             [FromBody] List<RunGpsPointDto> points)
@@ -503,8 +626,27 @@ namespace ILAQA.Controllers
             _context.RunGpsPoints.AddRange(newPoints);
             await _context.SaveChangesAsync();
 
-            // Detect and persist completed loops NOW, while the run is active.
-            var newlyClaimed = await SaveNewTerritoriesAsync(runId, userId);
+            // The GPS points above are always kept. If territory work fails
+            // on unusual GPS, it is logged and retried on the next upload.
+            var newlyClaimed = new List<Territory>();
+            await transaction.CreateSavepointAsync("territories");
+            try
+            {
+                // Move poor GPS points onto the road once.
+                await _territoryClaimService.SnapPoorPointsAsync(runId);
+
+                // Detect and save completed loops now, while the run is active.
+                (newlyClaimed, _) = await _territoryClaimService.SaveNewTerritoriesAsync(
+                    runId, userId, runIsFinishing: false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex,
+                    "Territory processing failed for upload to run {RunId}.",
+                    runId);
+                await transaction.RollbackToSavepointAsync("territories");
+                _context.ChangeTracker.Clear();
+            }
 
             // Return all confirmed territories, including claims from earlier
             // uploads, so an upload retry can restore the map correctly.
@@ -513,6 +655,8 @@ namespace ILAQA.Controllers
                 .Where(t => t.RunId == runId && t.OwnerUserId == userId)
                 .OrderBy(t => t.LoopIndex)
                 .ToListAsync();
+
+            var claimDecisions = await GetClaimDecisionsAsync(runId);
 
             await transaction.CommitAsync();
 
@@ -533,63 +677,37 @@ namespace ILAQA.Controllers
                         Latitude = c.Y,
                         Longitude = c.X
                     }).ToList()
-                }).ToList()
+                }).ToList(),
+                ClaimDecisions = claimDecisions
             });
         }
 
-        // Called only while the caller holds a transaction and a FOR UPDATE
-        // lock on the matching Runs row. This makes concurrent upload/finish
-        // requests serialize their claims for the same run.
-        private async Task<List<Territory>> SaveNewTerritoriesAsync(
-            Guid runId, string userId)
+        // Every claim decision for a run, including rejection reasons (FR-17).
+        private async Task<List<ClaimDecision>> GetClaimDecisionsAsync(
+            Guid runId)
         {
-            var gpsPoints = await _context.RunGpsPoints
+            return await _context.TerritoryClaims
                 .AsNoTracking()
-                .Where(p => p.RunId == runId)
-                .OrderBy(p => p.SequenceNo)
+                .Where(c => c.RunId == runId)
+                .OrderBy(c => c.StartSequenceNo)
+                .ThenBy(c => c.EndSequenceNo)
+                .Select(c => new ClaimDecision(
+                    c.StartSequenceNo,
+                    c.EndSequenceNo,
+                    c.Status,
+                    c.DecisionReason,
+                    Math.Round(c.ProposedAreaSquareMeters, 2),
+                    c.ResultTerritoryId))
                 .ToListAsync();
-
-            var detector = new TerritoryDetectionService(_gpsDistanceService);
-            var polygons = detector.FindTerritories(gpsPoints);
-
-            var savedLoopIndexes = await _context.Territories
-                .AsNoTracking()
-                .Where(t => t.RunId == runId && t.OwnerUserId == userId)
-                .Select(t => t.LoopIndex)
-                .ToListAsync();
-
-            var existing = savedLoopIndexes.ToHashSet();
-            var newlyClaimed = new List<Territory>();
-            var now = DateTime.UtcNow;
-
-            for (int i = 0; i < polygons.Count; i++)
-            {
-                int loopIndex = i + 1;
-                if (existing.Contains(loopIndex))
-                    continue;
-
-                var polygon = polygons[i];
-                var territory = new Territory
-                {
-                    RunId = runId,
-                    LoopIndex = loopIndex,
-                    OwnerUserId = userId,
-                    Boundary = polygon,
-                    AreaSquareMeters = detector.CalculateTerritoryArea(polygon),
-                    Status = "Active",
-                    CreatedAt = now,
-                    UpdatedAt = now
-                };
-
-                _context.Territories.Add(territory);
-                newlyClaimed.Add(territory);
-            }
-
-            if (newlyClaimed.Count > 0)
-                await _context.SaveChangesAsync();
-
-            return newlyClaimed;
         }
+
+        public sealed record ClaimDecision(
+            int StartSequenceNo,
+            int EndSequenceNo,
+            string Status,
+            string? DecisionReason,
+            double AreaSquareMeters,
+            Guid? TerritoryId);
 
 
         [HttpGet("routes")]
@@ -618,19 +736,21 @@ namespace ILAQA.Controllers
             {
                 RunId = run.Id,
                 StartedAt = run.StartedAt,
-                Legs = points
-                    .Where(p => p.RunId == run.Id)
-                    .GroupBy(p => p.LegNo)
-                    .Select(leg => new
+                // Cleaned lines: no GPS teleports or bad fixes, road-snapped
+                // where GPS was poor, split where GPS was missing.
+                Legs = _territoryDetectionService
+                    .BuildDisplayRoute(points
+                        .Where(p => p.RunId == run.Id)
+                        .ToList())
+                    .Select((line, index) => new
                     {
-                        LegNo = leg.Key,
-                        Coordinates = leg.Select(p => new
+                        LegNo = index + 1,
+                        Coordinates = line.Select(p => new
                         {
                             Latitude = p.Latitude,
                             Longitude = p.Longitude
                         }).ToList()
                     })
-                    .Where(leg => leg.Coordinates.Count >= 2)
                     .ToList()
             })
             .Where(run => run.Legs.Count > 0)
@@ -638,26 +758,57 @@ namespace ILAQA.Controllers
 
             return Ok(routes);
         }
+        
         [HttpGet("territories")]
-        public async Task<IActionResult> GetMyTerritories()
+        public async Task<IActionResult> GetMapTerritories()
         {
-            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var viewerUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
-            if (string.IsNullOrWhiteSpace(userId))
+            if (string.IsNullOrWhiteSpace(viewerUserId))
                 return Unauthorized();
 
-            var territories = await _context.Territories
-                .AsNoTracking()
-                .Where(t => t.OwnerUserId == userId && t.Status == "Active")
-                .OrderByDescending(t => t.CreatedAt)
+            // Only the owner columns the map needs (never password data).
+            var rows = await (
+                from t in _context.Territories.AsNoTracking()
+                where t.Status == "Active" || t.Status == "Vulnerable"
+                join u in _context.Users on t.OwnerUserId equals u.Id
+                join r in _context.Runs on t.RunId equals (Guid?)r.Id into runs
+                from r in runs.DefaultIfEmpty()
+                orderby t.CreatedAt descending
+                select new
+                {
+                    Territory = t,
+                    Owner = new ApplicationUser
+                    {
+                        Id = u.Id,
+                        UserName = u.UserName,
+                        DisplayName = u.DisplayName,
+                        IsProfilePublic = u.IsProfilePublic
+                    },
+                    RunStatus = r == null ? null : r.Status
+                })
                 .ToListAsync();
 
-            return Ok(territories.Select(t => new
+            // Other runners' new land appears only after their run ends.
+            rows = rows
+                .Where(row => TerritoryDetectionService.IsVisibleOnMap(
+                    row.Owner.Id, row.RunStatus, viewerUserId))
+                .ToList();
+
+            var now = DateTime.UtcNow;
+
+            // Private runners appear as "Anonymous profile" (FR-21).
+            return Ok(rows.Select(row => new
             {
-                TerritoryId = t.Id,
-                RunId = t.RunId,
-                AreaSquareMeters = Math.Round(t.AreaSquareMeters, 2),
-                Boundary = t.Boundary.Coordinates.Select(c => new
+                TerritoryId = row.Territory.Id,
+                AreaSquareMeters = Math.Round(row.Territory.AreaSquareMeters, 2),
+                ColorHex = TerritoryDetectionService.OwnerColor(row.Owner.Id),
+                OwnerLabel = TerritoryDetectionService.OwnerLabel(
+                    row.Owner, viewerUserId),
+                IsMine = row.Owner.Id == viewerUserId,
+                IsShielded = TerritoryDetectionService.IsShielded(
+                    row.Territory, now),
+                Boundary = row.Territory.Boundary.Coordinates.Select(c => new
                 {
                     Latitude = c.Y,
                     Longitude = c.X

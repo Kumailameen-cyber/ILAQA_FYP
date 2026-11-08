@@ -227,13 +227,24 @@ const uploadProfilePicture = async () => {
     if (!token) throw new Error('Please log in again.');
 
     // Preserve the Expo File upload method already tested on Android.
-    const imageFile = new File(selectedPhoto.uri);
-    const formData = new FormData();
-    formData.append(
-      'file',
-      imageFile,
-      selectedPhoto.fileName || 'profile.jpg'
-    );
+    
+   const formData = new FormData();
+
+const mimeType = selectedPhoto.mimeType || 'image/jpeg';
+
+const fileName =
+  selectedPhoto.fileName ||
+  (mimeType === 'image/png'
+    ? 'profile.png'
+    : mimeType === 'image/webp'
+      ? 'profile.webp'
+      : 'profile.jpg');
+
+formData.append('file', {
+  uri: selectedPhoto.uri,
+  name: fileName,
+  type: mimeType,
+} as any);
 
     const response = await fetch(`${API_URL}/api/runner/me/profile-picture`, {
       method: 'POST',

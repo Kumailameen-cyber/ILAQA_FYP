@@ -25,6 +25,11 @@ namespace ILAQA.Models
         // GPS accuracy in meters.
         public double? AccuracyMeters { get; set; }
 
+        // Road-snapped position for poor GPS (FR-12). Null when the point
+        // was accurate or not snapped. The raw position above is kept.
+        public double? SnappedLatitude { get; set; }
+        public double? SnappedLongitude { get; set; }
+
         // When the phone recorded this point (UTC).
         public DateTime RecordedAt { get; set; }
 

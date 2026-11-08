@@ -154,7 +154,7 @@ namespace ILAQA.Controllers
                     "ILAQA - Verify Your Email",
                     $"Welcome to ILAQA!\n\n" +
                     $"Your verification code is: {otp}\n\n" +
-                    "This code expires in 60 seconds.\n\n" +
+                    "This code expires in 10 minutes.\n\n" +
                     "If you didn't register, ignore this email."
                 );
             }
@@ -869,7 +869,7 @@ namespace ILAQA.Controllers
                 $"password-reset:{user.Id}", otp);
 
             reset.CreatedAt = now;
-            reset.ExpiresAt = now.AddSeconds(60);
+            reset.ExpiresAt = now.AddMinutes(10);
             reset.FailedAttempts = 0;
             reset.UsedAt = null;
             reset.LastOtpSentAt = now;
@@ -885,7 +885,7 @@ namespace ILAQA.Controllers
                     email,
                     "ILAQA - Password Reset Code",
                     $"Your ILAQA password reset code is: {otp}\n\n" +
-                    "This code expires in 60 seconds.\n\n" +
+                    "This code expires in 10 minutes.\n\n" +
                     "If you did not request a password reset, " +
                     "you can safely ignore this email."
                 );

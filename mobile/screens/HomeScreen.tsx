@@ -33,7 +33,11 @@ import {
   markRunFinishRequested,
   getConfirmedTerritories,
   ConfirmedTerritory,
-  saveGpsPoint
+  inspectSavedRuns,
+  getActiveRunState,
+  saveRunTiming,
+  ActiveRunState,
+  getRunSyncRecord,
 } from '../services/runStorage';
 import {
   syncRun,
@@ -93,6 +97,21 @@ function formatDuration(seconds: number): string {
     : `${pad(minutes)}:${pad(remainingSeconds)}`;
 }
 
+
+// Live route drawing limits (display only).
+const LIVE_MAX_ACCURACY_METERS = 20;
+const LIVE_MAX_SPEED_MPS = 8;
+
+// "#RRGGBB" -> "rgba(r, g, b, alpha)" for translucent territory fills.
+function withAlpha(hex: string, alpha: number): string {
+  const value = parseInt(hex.replace('#', ''), 16);
+  if (!Number.isFinite(value)) return `rgba(198, 255, 53, ${alpha})`;
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export default function HomeScreen({
   runnerId,
   displayName,
@@ -102,6 +121,7 @@ export default function HomeScreen({
   const gpsSubscription = useRef<Location.LocationSubscription | null>(null);
   const routeRef = useRef<LatLng[]>([]);
   const lastLivePointRef = useRef<LatLng | null>(null);
+  const lastLiveTimeRef = useRef(0);
   const [routeSegments, setRouteSegments] = useState<LatLng[][]>([]);
   const activeSegmentRef = useRef<LatLng[]>([]);
   const elapsedBeforeSegmentRef = useRef(0);
@@ -115,62 +135,84 @@ export default function HomeScreen({
   const [locationError, setLocationError] = useState('');
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
   
-  const [confirmedTerritories, setConfirmedTerritories] =
-    useState<ConfirmedTerritory[]>([]);
+  
   const [savedRoutes, setSavedRoutes] =
     useState<SavedRunRoute[]>([]);
   const [savedTerritories, setSavedTerritories] =
     useState<ConfirmedTerritory[]>([]);
 
   // Load confirmed territory boundaries from the backend.
-  useEffect(() => {
-    let mounted = true;
+ 
+// Fetch all active territories from the backend.
+// Refresh every 15 seconds so other players' claims appear.
+useEffect(() => {
+  let mounted = true;
+  let fetching = false;
 
-    const loadSavedTerritories = async () => {
-      try {
-        const territories = await fetchSavedTerritories();
-        if (mounted) {
-          setSavedTerritories(territories);
-          console.log('ILAQA SAVED TERRITORIES:', territories.length);
-        }
-      } catch (error) {
-        console.error('Unable to load saved territories:', error);
+  const loadSavedTerritories = async () => {
+    if (fetching) return;
+    fetching = true;
+
+    try {
+      const territories = await fetchSavedTerritories();
+
+      if (mounted) {
+        setSavedTerritories(territories);
+        console.log('ILAQA MAP TERRITORIES:', territories.length);
       }
-    };
+    } catch (error) {
+      console.log('Territory refresh failed:', error);
+    } finally {
+      fetching = false;
+    }
+  };
 
+  void loadSavedTerritories();
+
+  const interval = setInterval(() => {
     void loadSavedTerritories();
-    return () => { mounted = false; };
-  }, [runnerId]);
+  }, 15000);
 
-  // Load historical GPS routes independently (never nest React hooks).
-  useEffect(() => {
-    let mounted = true;
+  return () => {
+    mounted = false;
+    clearInterval(interval);
+  };
+}, [runnerId]);
 
-    const loadRoutes = async () => {
-      try {
-        const routes = await fetchSavedRoutes();
-        if (mounted) {
-          setSavedRoutes(routes);
-          console.log('ILAQA SAVED ROUTES:', routes.length);
-        }
-      } catch (error) {
-        console.error('Unable to load saved routes:', error);
-      }
-    };
 
-    void loadRoutes();
-    return () => { mounted = false; };
-  }, [runnerId]);
+ // Load saved routes on startup and whenever a run finishes syncing.
+const loadRoutes = async () => {
+  try {
+    const routes = await fetchSavedRoutes();
+    setSavedRoutes(routes);
+    console.log('ILAQA SAVED ROUTES:', routes.length);
+  } catch (error) {
+    console.error('Unable to load saved routes:', error);
+  }
+};
+
+useEffect(() => {
+  void loadRoutes();
+}, [runnerId]);
+
+    
 
   const [syncMessage, setSyncMessage] = useState('');
 
   const [distanceMeters, setDistanceMeters] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [startingRun, setStartingRun] = useState(false);
+  // True until an unfinished run in SQLite has been restored.
+  const [restoringRun, setRestoringRun] = useState(true);
 
   const updateRunStatus = (status: RunStatus) => {
     statusRef.current = status;
     setRunStatus(status);
+  };
+
+  // Glide the camera to the runner, keeping the user's zoom and rotation.
+  const followRunner = (point: LatLng) => {
+    mapRef.current?.animateCamera({ center: point }, { duration: 900 });
   };
 
   const centerMap = (latitude: number, longitude: number) => {
@@ -245,11 +287,23 @@ export default function HomeScreen({
       try {
         // Upload current run first, and then any pending finished runs.
         const current = activeRunIdRef.current;
-        if (current) await syncRun(current);
-        await syncPendingRuns(runnerId);
-        const territories = await getConfirmedTerritories(runnerId);
+        let endedNow = 0;
+
+        if (current) {
+          const result = await syncRun(current);
+          if (result.endedNow) endedNow++;
+        }
+
+        endedNow += await syncPendingRuns(runnerId);
+
+        // Saved routes change only when a run finished syncing; they are
+        // also loaded when the screen opens. (No more reload every 5 s.)
+        if (mounted && endedNow > 0) {
+          await loadRoutes();
+        }
+        
         if (mounted) {
-          setConfirmedTerritories(territories);
+          
           setSyncMessage('');
         }
       } catch (error) {
@@ -287,7 +341,7 @@ export default function HomeScreen({
     const subscription = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.High,
-        distanceInterval: 3,
+        distanceInterval: 5, // FR-06: record a point every 5 m
         timeInterval: 1000,
       },
       (position) => {
@@ -296,55 +350,58 @@ export default function HomeScreen({
         const coords = position.coords;
         setLocation(coords);
 
-        // Basic GPS accuracy filtering.
-        if (
-          coords.accuracy !== null &&
-          coords.accuracy > 30
-        ) {
-          return;
-        }
+        // Live line only (the server still receives every raw GPS point):
+        // draw good fixes, ignore wobble while standing still and
+        // impossible jumps, and soften zig-zags.
+        const accuracy = coords.accuracy ?? LIVE_MAX_ACCURACY_METERS;
+        if (accuracy > LIVE_MAX_ACCURACY_METERS) return;
 
-        const point: LatLng = {
+        const raw: LatLng = {
           latitude: coords.latitude,
           longitude: coords.longitude,
         };
+        let point = raw;
 
         const previousRoute = routeRef.current;
         const lastPoint = lastLivePointRef.current;
 
         if (lastPoint) {
-          const segmentDistance = calculateDistanceMeters(lastPoint, point);
+          const rawDistance = calculateDistanceMeters(lastPoint, raw);
+          const seconds = Math.max(
+            0.5,
+            (position.timestamp - lastLiveTimeRef.current) / 1000
+          );
 
-          // Ignore tiny GPS movements and extreme jumps.
-          if (segmentDistance < 2 || segmentDistance > 100) {
-            return;
-          }
+          // Standing still: movement smaller than the fix's own error.
+          if (rawDistance < Math.max(3, accuracy * 0.5)) return;
 
-          setDistanceMeters((previous) => previous + segmentDistance);
+          // Faster than any runner: a GPS jump, not real movement.
+          if (rawDistance / seconds > LIVE_MAX_SPEED_MPS) return;
+
+          // Move most of the way to the new fix; good fixes count more.
+          const weight = accuracy <= 8 ? 0.7 : 0.5;
+          point = {
+            latitude:
+              lastPoint.latitude + (raw.latitude - lastPoint.latitude) * weight,
+            longitude:
+              lastPoint.longitude + (raw.longitude - lastPoint.longitude) * weight,
+          };
+
+          setDistanceMeters(
+            (previous) => previous + calculateDistanceMeters(lastPoint, point)
+          );
         }
 
         lastLivePointRef.current = point;
-        // Save valid foreground GPS points to SQLite as well.
-const currentRunId = activeRunIdRef.current;
+        lastLiveTimeRef.current = position.timestamp;
 
-if (currentRunId) {
-  void saveGpsPoint(
-    currentRunId,
-    coords.latitude,
-    coords.longitude,
-    coords.accuracy,
-    position.timestamp
-  ).catch((error) => {
-    console.error('ILAQA foreground GPS save failed:', error);
-  });
-}
         const nextRoute = [...previousRoute, point];
         routeRef.current = nextRoute;
         const nextSegment = [...activeSegmentRef.current, point];
         activeSegmentRef.current = nextSegment;
         setRouteSegments((segments) => [...segments.slice(0, -1), nextSegment]);
 
-        centerMap(point.latitude, point.longitude);
+        followRunner(point);
       }
     );
 
@@ -387,7 +444,7 @@ const startBackgroundTracking = async () => {
     BACKGROUND_LOCATION_TASK,
     {
       accuracy: Location.Accuracy.High,
-      distanceInterval: 3,
+      distanceInterval: 5, // FR-06: record a point every 5 m
       timeInterval: 1000,
       pausesUpdatesAutomatically: false,
       foregroundService: {
@@ -411,8 +468,124 @@ const stopBackgroundTracking = async () => {
   }
 };
  
+// Bring back a run that is still active in SQLite: after switching tabs
+// (this screen unmounts), or after Android restarted the app. Background
+// GPS kept recording meanwhile; the timer and route continue from storage.
+const restoreActiveRun = async (state: ActiveRunState) => {
+  activeRunIdRef.current = state.runId;
+  elapsedBeforeSegmentRef.current = state.activeMsBefore;
+
+  // Redraw the route recorded so far, one line per leg.
+  const points = await getRunPoints(state.runId);
+  const segments: LatLng[][] = [];
+  let lastLeg = -1;
+  let meters = 0;
+  for (const stored of points) {
+    const point = { latitude: stored.latitude, longitude: stored.longitude };
+    if (stored.legNo !== lastLeg) {
+      segments.push([]);
+      lastLeg = stored.legNo;
+    } else {
+      const current = segments[segments.length - 1];
+      meters += calculateDistanceMeters(current[current.length - 1], point);
+    }
+    segments[segments.length - 1].push(point);
+  }
+  routeRef.current = segments.flat();
+  lastLivePointRef.current = null;
+  activeSegmentRef.current = [];
+  setDistanceMeters(meters);
+
+  if (state.isRecording) {
+    const segmentStart = state.segmentStartedAt ?? Date.now();
+    segmentStartedAtRef.current = segmentStart;
+    if (state.segmentStartedAt === null) {
+      await saveRunTiming(state.runId, state.activeMsBefore, segmentStart);
+    }
+    setRouteSegments([...segments, []]);
+    updateRunStatus('running');
+    try {
+      await startBackgroundTracking();
+    } catch (error) {
+      console.error('Unable to restart background GPS:', error);
+      setSyncMessage('Background GPS needs attention. Check location permission.');
+    }
+    await startGpsWatcher();
+  } else {
+    segmentStartedAtRef.current = null;
+    setRouteSegments(segments);
+    setElapsedSeconds(Math.floor(state.activeMsBefore / 1000));
+    updateRunStatus('paused');
+  }
+};
+
+// A run left on this phone by another account (for example after an
+// expired session signed that runner out) belongs to that account: finish
+// it for its owner, so it syncs when they sign in again, instead of
+// recording this runner's GPS into it.
+const belongsToAnotherAccount = async (state: ActiveRunState) => {
+  const record = await getRunSyncRecord(state.runId);
+  return !record || record.ownerUserId !== runnerId;
+};
+
+const finishForOtherAccount = async (state: ActiveRunState) => {
+  const points = await getRunPoints(state.runId);
+  const lastFix = points.length > 0 ? points[points.length - 1].timestamp : Date.now();
+  const runningMs = state.isRecording && state.segmentStartedAt !== null
+    ? Math.max(0, lastFix - state.segmentStartedAt)
+    : 0;
+  await setRunRecording(state.runId, false);
+  await stopBackgroundTracking();
+  await markRunFinishRequested(
+    state.runId,
+    new Date(lastFix).toISOString(),
+    Math.floor((state.activeMsBefore + runningMs) / 1000)
+  );
+  await clearActiveRun();
+};
+
+useEffect(() => {
+  let active = true;
+  (async () => {
+    try {
+      let state = await getActiveRunState();
+      if (state && (await belongsToAnotherAccount(state))) {
+        await finishForOtherAccount(state);
+        state = null;
+      }
+      if (active && state && statusRef.current === 'idle') {
+        await restoreActiveRun(state);
+        // The screen closed while restoring: stop the live map watcher.
+        if (!active) {
+          gpsSubscription.current?.remove();
+          gpsSubscription.current = null;
+        }
+      }
+    } catch (error) {
+      console.error('Unable to restore the active run:', error);
+    } finally {
+      if (active) setRestoringRun(false);
+    }
+  })();
+  return () => {
+    active = false;
+  };
+}, []);
+
 const startRun = async () => {
   if (startingRun || statusRef.current !== 'idle') return;
+
+  // Never start a second run over an unfinished one: continue it instead
+  // (or finish it for its owner if another account left it here).
+  const unfinished = await getActiveRunState().catch(() => null);
+  if (unfinished) {
+    if (await belongsToAnotherAccount(unfinished)) {
+      await finishForOtherAccount(unfinished);
+    } else {
+      await restoreActiveRun(unfinished);
+      return;
+    }
+  }
 
   setStartingRun(true);
   let backgroundStarted = false;
@@ -459,7 +632,11 @@ const startRun = async () => {
     // Create a unique ID for this run.
     const runId = Crypto.randomUUID();
     // Keep the original UTC start time so /start can be safely retried.
-    await registerRunForSync(runId, runnerId, new Date().toISOString());
+    // GPS points carry GPS fix times, so never start after the first fix:
+    // a phone clock running fast would otherwise make the server reject
+    // every batch as "before run start" and the run could never sync.
+    const startedAtMs = Math.min(Date.now(), initialLocation.timestamp);
+    await registerRunForSync(runId, runnerId, new Date(startedAtMs).toISOString());
 
     await setActiveRun(runId);
     activeRunIdRef.current = runId;
@@ -482,14 +659,15 @@ const startRun = async () => {
     
     elapsedBeforeSegmentRef.current = 0;
     segmentStartedAtRef.current = Date.now();
+    await saveRunTiming(runId, 0, segmentStartedAtRef.current);
     setElapsedSeconds(0);
     setLocation(initialLocation.coords);
 
     updateRunStatus('running');
     await startGpsWatcher();
     // Starting the server run is part of syncRun; it retries offline.
-    void syncRun(runId)
-      .then(async () => setConfirmedTerritories(await getConfirmedTerritories(runnerId)))
+   void syncRun(runId)
+  .then(() => setSyncMessage(''))
       .catch((error) => {
         console.log('Run will sync when online:', error);
         setSyncMessage('GPS saved locally. Server sync pending.');
@@ -523,11 +701,14 @@ const startRun = async () => {
       }
     }
 
-    try {
-      await clearActiveRun();
-      activeRunIdRef.current = null;
-    } catch (cleanupError) {
-      console.error('Unable to clear active run:', cleanupError);
+    // Only clear the run this attempt created, never another active run.
+    if (activeRunIdRef.current) {
+      try {
+        await clearActiveRun();
+        activeRunIdRef.current = null;
+      } catch (cleanupError) {
+        console.error('Unable to clear active run:', cleanupError);
+      }
     }
 
     Alert.alert(
@@ -557,6 +738,7 @@ const startRun = async () => {
     try {
       const runId = activeRunIdRef.current;
       if (runId) await setRunRecording(runId, false);
+      if (runId) await saveRunTiming(runId, elapsedBeforeSegmentRef.current, null);
       await stopBackgroundTracking();
     } catch (error) {
       console.error('Unable to fully pause GPS:', error);
@@ -583,6 +765,7 @@ await resumeRunRecording(runId);
       activeSegmentRef.current = [];
       setRouteSegments((segments) => [...segments, []]);
       segmentStartedAtRef.current = Date.now();
+      await saveRunTiming(runId, elapsedBeforeSegmentRef.current, segmentStartedAtRef.current);
       updateRunStatus('running');
       await startGpsWatcher();
     } catch (error) {
@@ -594,6 +777,7 @@ await resumeRunRecording(runId);
       gpsSubscription.current?.remove();
       gpsSubscription.current = null;
       try { await setRunRecording(runId, false); } catch (e) { console.error(e); }
+      try { await saveRunTiming(runId, elapsedBeforeSegmentRef.current, null); } catch (e) { console.error(e); }
       try { await stopBackgroundTracking(); } catch (e) { console.error(e); }
       Alert.alert('GPS Error', 'Unable to resume GPS tracking.');
     } finally {
@@ -622,16 +806,19 @@ await resumeRunRecording(runId);
           if (busyRef.current) return;
           busyRef.current = true;
           setStartingRun(true);
+          const finishedAt = new Date().toISOString();
           const started = segmentStartedAtRef.current;
           if (started !== null) elapsedBeforeSegmentRef.current += Date.now() - started;
           segmentStartedAtRef.current = null;
-          const totalTime = formatDuration(Math.floor(elapsedBeforeSegmentRef.current / 1000));
+          const activeSeconds = Math.floor(elapsedBeforeSegmentRef.current / 1000);
+          const totalTime = formatDuration(activeSeconds);
           const totalKm = (distanceMeters / 1000).toFixed(2);
           try {
             const runId = await stopAndKeepSavedPoints();
             const savedPoints = runId ? await getRunPoints(runId) : [];
-            // Queue Finish *before* clearing the active marker.
-            if (runId) await markRunFinishRequested(runId);
+            // Queue Finish *before* clearing the active marker. The end time
+            // and running time go with /end, even if it is sent later.
+            if (runId) await markRunFinishRequested(runId, finishedAt, activeSeconds);
             await clearActiveRun();
             activeRunIdRef.current = null;
             routeRef.current = [];
@@ -645,16 +832,18 @@ await resumeRunRecording(runId);
             Alert.alert('Run Saved',
               `Live distance: ${totalKm} km\nTime: ${totalTime}\nGPS points stored: ${savedPoints.length}\n\nGPS points are stored on your phone. Territory claims will sync with the backend when connected.`);
             if (runId) {
-              void syncRun(runId)
-                .then(async () => {
-                  setConfirmedTerritories(await getConfirmedTerritories(runnerId));
-                  setSyncMessage('');
-                })
-                .catch((error) => {
-                  console.log('Finish queued for retry:', error);
-                  setSyncMessage('Run saved locally. Finish sync pending.');
-                });
-            }
+  void syncRun(runId)
+    .then(async () => {
+      // Fetch the finished route from the backend.
+      await loadRoutes();
+
+      setSyncMessage('');
+    })
+    .catch((error) => {
+      console.log('Finish queued for retry:', error);
+      setSyncMessage('Run saved locally. Finish sync pending.');
+    });
+}
           } catch (error) {
             console.error('Unable to finish run safely:', error);
             Alert.alert('Finish Error', 'Could not fully stop tracking. Your run has not been cleared. Try Finish again.');
@@ -666,7 +855,22 @@ await resumeRunRecording(runId);
       },
     ]);
   };
-
+const inspectOldGps = async () => {
+  try {
+    const runs = await inspectSavedRuns();
+    console.log('ILAQA OLD GPS RUNS:', JSON.stringify(runs));
+    Alert.alert(
+      'Saved GPS Runs',
+      runs.length
+        ? runs.map(r =>
+            `${r.runId.slice(0, 8)}: ${r.pointCount} points, sync=${r.hasSyncRecord}`
+          ).join('\n')
+        : 'No GPS points stored'
+    );
+  } catch (error) {
+    Alert.alert('Inspection Error', String(error));
+  }
+};
 
   const recenterMap = () => {
     if (location) {
@@ -691,8 +895,15 @@ await resumeRunRecording(runId);
             busyRef.current = true;
             setStartingRun(true);
             try {
+              const endedAt = new Date().toISOString();
+              const segmentStart = segmentStartedAtRef.current;
+              const activeMs = elapsedBeforeSegmentRef.current +
+                (segmentStart !== null ? Date.now() - segmentStart : 0);
               const endingRunId = await stopAndKeepSavedPoints();
-              if (endingRunId) await markRunFinishRequested(endingRunId);
+              if (endingRunId) {
+                await markRunFinishRequested(
+                  endingRunId, endedAt, Math.floor(activeMs / 1000));
+              }
               await clearActiveRun();
               activeRunIdRef.current = null;
               onLogout();
@@ -764,39 +975,34 @@ await resumeRunRecording(runId);
                 coordinates={segment}
                 strokeColor="#C6FF35"
                 strokeWidth={5}
+                lineCap="round"
+                lineJoin="round"
               />
             ) : null
           )}
-          {savedTerritories.map((territory) => (
-  <Polygon
-    key={`saved-${territory.territoryId}`}
-    coordinates={territory.boundary}
-    fillColor="rgba(198, 255, 53, 0.35)"
-    strokeColor="#C6FF35"
-    strokeWidth={3}
-    tappable
-    onPress={() =>
-      Alert.alert(
-        'Saved Territory',
-        `Area: ${territory.areaSquareMeters.toFixed(2)} m²\nSaved in Supabase`
-      )
-    }
-  />
-))}
-{confirmedTerritories.map((territory) => (
-  <Polygon
-    key={`territory-confirmed-${territory.territoryId}`}
-    coordinates={territory.boundary}
-    fillColor="rgba(198, 255, 53, 0.35)"
-    strokeColor="#C6FF35"
-    strokeWidth={4}
-    tappable
-    onPress={() => Alert.alert(
-      'Claimed Territory',
-      `Confirmed by backend\nArea: ${territory.areaSquareMeters.toFixed(2)} m²`
-    )}
-  />
-))}
+          {savedTerritories.map((territory) => {
+  // Each runner has their own colour; fall back to ILAQA lime.
+  const color = territory.colorHex ?? '#C6FF35';
+  return (
+    <Polygon
+      key={`saved-${territory.territoryId}`}
+      coordinates={territory.boundary}
+      fillColor={withAlpha(color, 0.35)}
+      strokeColor={color}
+      strokeWidth={3}
+      tappable
+      onPress={() =>
+        Alert.alert(
+          territory.isMine ? 'Your Territory' : 'Territory',
+          `Owner: ${territory.ownerLabel ?? 'Anonymous profile'}\n` +
+            `Area: ${territory.areaSquareMeters.toFixed(2)} m²\n` +
+            `Status: ${territory.isShielded === false ? 'Vulnerable' : 'Shielded'}`
+        )
+      }
+    />
+  );
+})}
+
 
           {/* Historical GPS routes from Supabase; one polyline per leg. */}
           {savedRoutes.map((run) =>
@@ -813,7 +1019,19 @@ await resumeRunRecording(runId);
           )}
 
         </MapView>
-
+<TouchableOpacity
+  onPress={inspectOldGps}
+  style={{
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    backgroundColor: '#0C0D0C',
+    padding: 12,
+    borderRadius: 10,
+  }}
+>
+  <Text style={{ color: '#C6FF35' }}>CHECK OLD GPS</Text>
+</TouchableOpacity>
         <TouchableOpacity
           style={styles.recenterButton}
           onPress={recenterMap}
@@ -895,10 +1113,10 @@ await resumeRunRecording(runId);
           <TouchableOpacity
             style={[
               styles.primaryButton,
-              (loading || startingRun) && styles.disabledButton,
+              (loading || startingRun || restoringRun) && styles.disabledButton,
             ]}
             onPress={startRun}
-            disabled={loading || startingRun}
+            disabled={loading || startingRun || restoringRun}
           >
             <Ionicons name="play" size={20} color="#0C0D0C" />
             <Text style={styles.primaryButtonText}>

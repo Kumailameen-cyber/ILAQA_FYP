@@ -21,6 +21,7 @@ namespace ILAQA.Migrations
                 .HasAnnotation("ProductVersion", "8.0.31")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "extensions", "postgis");
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
@@ -357,6 +358,12 @@ namespace ILAQA.Migrations
                     b.Property<int>("SequenceNo")
                         .HasColumnType("integer");
 
+                    b.Property<double?>("SnappedLatitude")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("SnappedLongitude")
+                        .HasColumnType("double precision");
+
                     b.HasKey("Id");
 
                     b.HasIndex("RunId", "RecordedAt");
@@ -419,6 +426,112 @@ namespace ILAQA.Migrations
                         .IsUnique();
 
                     b.ToTable("Territories");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.TerritoryClaim", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("DecidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecisionReason")
+                        .HasColumnType("text");
+
+                    b.Property<int>("EndSequenceNo")
+                        .HasColumnType("integer");
+
+                    b.Property<double?>("NewlyClaimedAreaSquareMeters")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("ProposedAreaSquareMeters")
+                        .HasColumnType("double precision");
+
+                    b.Property<Polygon>("ProposedBoundary")
+                        .IsRequired()
+                        .HasColumnType("geometry(Polygon,4326)");
+
+                    b.Property<Guid?>("ResultTerritoryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("StartSequenceNo")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("SubmittedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("XpAwarded")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ResultTerritoryId");
+
+                    b.HasIndex("RunId", "SubmittedAt");
+
+                    b.HasIndex("RunId", "StartSequenceNo", "EndSequenceNo");
+
+                    b.ToTable("TerritoryClaims");
+                });
+
+            modelBuilder.Entity("ILAQA.Models.TerritoryEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Geometry>("BoundaryAfter")
+                        .HasColumnType("geometry(Geometry,4326)");
+
+                    b.Property<Geometry>("BoundaryBefore")
+                        .HasColumnType("geometry(Geometry,4326)");
+
+                    b.Property<Guid?>("ClaimId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
+                    b.Property<string>("NewOwnerUserId")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PreviousOwnerUserId")
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("RelatedTerritoryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TerritoryId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClaimId");
+
+                    b.HasIndex("NewOwnerUserId");
+
+                    b.HasIndex("PreviousOwnerUserId");
+
+                    b.HasIndex("RelatedTerritoryId");
+
+                    b.HasIndex("TerritoryId", "OccurredAt");
+
+                    b.ToTable("TerritoryEvents");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
@@ -620,6 +733,49 @@ namespace ILAQA.Migrations
                         .WithMany()
                         .HasForeignKey("RunId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("ILAQA.Models.TerritoryClaim", b =>
+                {
+                    b.HasOne("ILAQA.Models.Territory", null)
+                        .WithMany()
+                        .HasForeignKey("ResultTerritoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ILAQA.Models.Run", null)
+                        .WithMany()
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ILAQA.Models.TerritoryEvent", b =>
+                {
+                    b.HasOne("ILAQA.Models.TerritoryClaim", null)
+                        .WithMany()
+                        .HasForeignKey("ClaimId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ILAQA.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("NewOwnerUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ILAQA.Models.ApplicationUser", null)
+                        .WithMany()
+                        .HasForeignKey("PreviousOwnerUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ILAQA.Models.Territory", null)
+                        .WithMany()
+                        .HasForeignKey("RelatedTerritoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("ILAQA.Models.Territory", null)
+                        .WithMany()
+                        .HasForeignKey("TerritoryId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>

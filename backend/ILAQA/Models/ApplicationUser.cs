@@ -15,7 +15,10 @@ namespace ILAQA.Models
 
 
 
-        public bool IsProfilePublic { get; set; } = false;
+        // New accounts are public (8 Nov decision): other runners see the
+        // runner's name on their land. Runners can switch to private in
+        // their profile; private owners show as "Anonymous profile".
+        public bool IsProfilePublic { get; set; } = true;
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     }
