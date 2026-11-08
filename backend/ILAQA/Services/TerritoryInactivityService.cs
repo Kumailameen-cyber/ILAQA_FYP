@@ -25,6 +25,7 @@ namespace ILAQA.Services
         {
             // Run once when the backend starts.
             await MarkVulnerableAsync(stoppingToken);
+            await RetryFailedRunsAsync(stoppingToken);
 
             // Then run every hour.
             using var timer = new PeriodicTimer(
@@ -33,6 +34,73 @@ namespace ILAQA.Services
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
                 await MarkVulnerableAsync(stoppingToken);
+                await RetryFailedRunsAsync(stoppingToken);
+            }
+        }
+
+        // Retry Finish processing of recently failed runs (UC-05/UC-07
+        // exception flows). Each run gets its own scope and transaction, so
+        // one bad run cannot block the others. Runs older than the window
+        // are left for the owner's /end retry.
+        private async Task RetryFailedRunsAsync(
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                List<Guid> due;
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var db = scope.ServiceProvider
+                        .GetRequiredService<ApplicationDbContext>();
+                    var configuration = scope.ServiceProvider
+                        .GetRequiredService<IConfiguration>();
+
+                    int windowDays = configuration.GetValue(
+                        "Territory:FailedRetryWindowDays",
+                        TerritoryDetectionService.DefaultFailedRetryWindowDays);
+                    var since = DateTime.UtcNow.AddDays(-windowDays);
+
+                    due = await db.Runs
+                        .AsNoTracking()
+                        .Where(r => r.Status == "Completed" &&
+                                    r.ValidationStatus == RunValidationStatuses.Failed &&
+                                    r.EndedAt > since)
+                        .OrderBy(r => r.EndedAt)
+                        .Select(r => r.Id)
+                        .ToListAsync(cancellationToken);
+                }
+
+                foreach (var runId in due)
+                {
+                    try
+                    {
+                        using var scope = _scopeFactory.CreateScope();
+                        var claims = scope.ServiceProvider
+                            .GetRequiredService<TerritoryClaimService>();
+
+                        bool recovered = await claims.RetryFailedRunAsync(
+                            runId, cancellationToken);
+
+                        _logger.LogInformation(
+                            "Retried territory processing for run {RunId}: {Outcome}.",
+                            runId, recovered ? "recovered" : "still failing");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex,
+                            "Retry of territory processing failed for run {RunId}.",
+                            runId);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                // Normal application shutdown.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to look up runs to retry.");
             }
         }
 

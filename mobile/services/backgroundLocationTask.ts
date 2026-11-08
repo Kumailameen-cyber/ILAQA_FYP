@@ -44,10 +44,11 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
         continue;
       await saveGpsPoint(runId, latitude, longitude, accuracy, item.timestamp);
     }
-    // Best-effort background upload. Android can delay/suspend tasks;
-    // the HomeScreen timer retries and SQLite retains unsent points.
+    // Best-effort background upload, at most every 5 s (this task fires on
+    // every GPS fix). Android can delay/suspend tasks; the HomeScreen timer
+    // retries and SQLite retains unsent points.
     try {
-      await syncRun(runId);
+      await syncRun(runId, { minIntervalMs: 5000 });
     } catch (syncError) {
       console.log('ILAQA background sync queued:', String(syncError));
     }

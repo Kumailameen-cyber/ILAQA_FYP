@@ -1,5 +1,7 @@
 ﻿using ILAQA.Models;
 using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries.Utilities;
+using NetTopologySuite.Index.Strtree;
 using NetTopologySuite.Operation.Overlay;
 using NetTopologySuite.Operation.OverlayNG;
 using NetTopologySuite.Operation.Polygonize;
@@ -319,14 +321,11 @@ namespace ILAQA.Services
 
                         continue;
                     }
-                    else if (_gpsDistanceService.CalculateDistance(
-                                 previous.Latitude, previous.Longitude,
-                                 point.Latitude, point.Longitude) >
-                             MaxBridgeDistanceMeters)
+                    else if (IsUnrecordedMovement(previous, point, gapSeconds))
                     {
-                        // Missing GPS over a long stretch (FR-11): do not
-                        // invent a straight route. Stops without movement
-                        // stay joined however long they last.
+                        // Missing GPS (FR-11): do not invent a straight
+                        // route. Stops without movement stay joined
+                        // however long they last.
                         sections.Add(section);
                         section = new List<RunGpsPoint>();
                     }
@@ -337,6 +336,26 @@ namespace ILAQA.Services
 
             sections.Add(section);
             return sections;
+        }
+
+        // A jump between two fixes that hides movement GPS never recorded:
+        // longer than 150 m, or (FR-11 "large gaps") more than 20 m after
+        // over 2 minutes without fixes. The phone records a fix every 5 m
+        // of movement, so a runner who keeps moving produces fixes every
+        // few seconds, while standing still produces none; a long silence
+        // followed by a real displacement means a stretch was not
+        // recorded. Jitter within 20 m (the closure tolerance) after a
+        // stop is not movement.
+        private bool IsUnrecordedMovement(
+            RunGpsPoint previous, RunGpsPoint point, double gapSeconds)
+        {
+            double meters = _gpsDistanceService.CalculateDistance(
+                previous.Latitude, previous.Longitude,
+                point.Latitude, point.Longitude);
+
+            return meters > MaxBridgeDistanceMeters ||
+                (gapSeconds > MaxTrackingGapSeconds &&
+                 meters > MaxClosureDistanceMeters);
         }
 
         // Cleaned distance travelled within one section.
@@ -461,6 +480,14 @@ namespace ILAQA.Services
             var geographicFactory = new GeometryFactory(
                 new PrecisionModel(), 4326);
 
+            // Index the route's points once, so each face only checks the
+            // points near it instead of the whole run (a long run with GPS
+            // wobble can have thousands of tiny faces).
+            var vertexIndex = new STRtree<int>();
+            for (int i = 0; i < sequenceNumbers.Count; i++)
+                vertexIndex.Insert(new Envelope(coordinates[i]), i);
+            vertexIndex.Build();
+
             foreach (var face in polygonizer.GetPolygons().OfType<Polygon>())
             {
                 if (face.IsEmpty || !face.IsValid)
@@ -481,10 +508,13 @@ namespace ILAQA.Services
 
                 // GPS sequence range of the points forming this face.
                 var faceSequences = new List<int>();
-                for (int i = 0; i < sequenceNumbers.Count; i++)
+                var nearFace = face.ExteriorRing.EnvelopeInternal.Copy();
+                nearFace.ExpandBy(FaceVertexToleranceMeters);
+                foreach (int i in vertexIndex.Query(nearFace))
                 {
                     var vertex = metricFactory.CreatePoint(coordinates[i]);
-                    if (face.ExteriorRing.IsWithinDistance(vertex, 0.01))
+                    if (face.ExteriorRing.IsWithinDistance(
+                            vertex, FaceVertexToleranceMeters))
                         faceSequences.Add(sequenceNumbers[i]);
                 }
 
@@ -506,6 +536,9 @@ namespace ILAQA.Services
 
             return candidates;
         }
+
+        // A route point this close to a face's ring forms that face.
+        private const double FaceVertexToleranceMeters = 0.01;
 
         // Convert a face from local metres back to longitude/latitude.
         private static Polygon ToGeographic(
@@ -626,11 +659,11 @@ namespace ILAQA.Services
                 ? withoutProtected
                 : Overlay(withoutProtected, ownLand, SpatialFunction.Difference);
 
-            var pieces = ValidPieces(free);
+            var pieces = StorablePieces(free);
 
             if (pieces.Count == 0)
             {
-                result.RejectionReason = ValidPieces(withoutProtected).Count == 0
+                result.RejectionReason = StorablePieces(withoutProtected).Count == 0
                     ? TerritoryRejectionReasons.Shielded
                     : TerritoryRejectionReasons.AlreadyOwned;
                 return result;
@@ -657,7 +690,7 @@ namespace ILAQA.Services
                 {
                     Territory = territory,
                     TakenPart = taken,
-                    RemainingPieces = ValidPieces(
+                    RemainingPieces = StorablePieces(
                         Overlay(territory.Boundary, awarded, SpatialFunction.Difference))
                 });
             }
@@ -676,6 +709,200 @@ namespace ILAQA.Services
                 territory.UpdatedAt.AddDays(ShieldDays);
 
             return shieldExpiresAt > now;
+        }
+
+        // Final ValidationStatus of a finished run. A failed Finish stays
+        // Failed even if live uploads already won land, because the
+        // postponed takeovers and shield renewal did not happen.
+        public static string DecideValidationStatus(
+            bool processingSucceeded, int approvedClaimCount)
+        {
+            if (!processingSucceeded)
+                return RunValidationStatuses.Failed;
+
+            return approvedClaimCount > 0
+                ? RunValidationStatuses.Validated
+                : RunValidationStatuses.NoClaim;
+        }
+
+        // ----- Finish timing (UC-02: accurate active duration) -----
+
+        // Phone clocks may run slightly ahead, as for StartedAt.
+        private static readonly TimeSpan MaxClientClockAhead =
+            TimeSpan.FromMinutes(5);
+
+        // GPS needs a moment to give the first fix after Resume, and Pause
+        // is pressed a moment after the last fix: slack per leg boundary.
+        private const int PauseBoundarySlackSeconds = 60;
+
+        // End time and active seconds of a finished run. The phone's values
+        // (sent with /end, also when Finish was pressed offline) are used
+        // only within what the stored GPS proves:
+        // - EndedAt: UTC, not before the start, not in the future (5 min
+        //   clock tolerance) and never before the last GPS point;
+        //   otherwise the server time is kept, as for older apps.
+        // - ActiveSeconds: at least the time recorded inside each leg, at
+        //   most the run's duration minus the gaps between legs (pauses).
+        //   Without a phone value the server's own count is bounded the
+        //   same way. Nothing is invented when the phone sends nothing.
+        public static FinishTiming ResolveFinishTiming(
+            DateTime startedAt,
+            DateTime serverNow,
+            int serverActiveSeconds,
+            DateTime? clientEndedAt,
+            int? clientActiveSeconds,
+            IReadOnlyList<RunGpsPoint> points)
+        {
+            var ordered = points.OrderBy(p => p.SequenceNo).ToList();
+            DateTime? lastFix = ordered.Count > 0
+                ? ordered.Max(p => p.RecordedAt)
+                : null;
+
+            var endedAt = serverNow;
+            if (clientEndedAt is { Kind: DateTimeKind.Utc } phoneEnd &&
+                phoneEnd >= startedAt &&
+                phoneEnd <= serverNow + MaxClientClockAhead)
+            {
+                endedAt = lastFix.HasValue && lastFix.Value > phoneEnd
+                    ? lastFix.Value
+                    : phoneEnd;
+            }
+
+            double wallSeconds = Math.Max(0, (endedAt - startedAt).TotalSeconds);
+
+            // Evidence from the legs: time spent recording, and gaps
+            // between one leg's last fix and the next leg's first fix.
+            double recordedSeconds = 0;
+            double pausedSeconds = 0;
+            var legs = ordered.GroupBy(p => p.LegNo).OrderBy(g => g.Key).ToList();
+            for (int i = 0; i < legs.Count; i++)
+            {
+                var legStart = legs[i].Min(p => p.RecordedAt);
+                var legEnd = legs[i].Max(p => p.RecordedAt);
+                recordedSeconds += (legEnd - legStart).TotalSeconds;
+
+                if (i > 0)
+                {
+                    var previousEnd = legs[i - 1].Max(p => p.RecordedAt);
+                    pausedSeconds += Math.Max(0,
+                        (legStart - previousEnd).TotalSeconds -
+                        PauseBoundarySlackSeconds);
+                }
+            }
+
+            int upper = (int)Math.Floor(Math.Max(0, wallSeconds - pausedSeconds));
+            int lower = (int)Math.Min(Math.Ceiling(recordedSeconds), upper);
+
+            int reported = clientActiveSeconds is >= 0
+                ? clientActiveSeconds.Value
+                : serverActiveSeconds;
+
+            return new FinishTiming(endedAt, Math.Clamp(reported, lower, upper));
+        }
+
+        // ----- Merging adjacent land of one owner (UC-07 alternate) -----
+
+        // A shared border shorter than the minimum territory width is not a
+        // meaningful edge (e.g. two blocks touching at a corner).
+        public const double MinSharedEdgeMeters = 2 * MinHalfWidthMeters;
+
+        // Coordinates closer than this count as the same border (5 cm).
+        private const double SharedEdgeToleranceMeters = 0.05;
+
+        // Merging must not change protection, so only land with the same
+        // owner, the same status and the same shield end merges. A run with
+        // 200 m of genuine distance renews all shields to one end time first.
+        public static bool CanMerge(Territory a, Territory b)
+        {
+            return a.Id != b.Id &&
+                a.OwnerUserId == b.OwnerUserId &&
+                a.Status == b.Status &&
+                (a.Status == "Active" || a.Status == "Vulnerable") &&
+                a.ShieldExpiresAt == b.ShieldExpiresAt;
+        }
+
+        // The single polygon formed by two pieces of land that share a
+        // meaningful edge (or overlap), or null when they should stay
+        // separate: corner contact, a short shared edge, no contact, or a
+        // union that is not one valid polygon.
+        public Polygon? MergedBoundary(Polygon a, Polygon b)
+        {
+            var common = Overlay(a, b, SpatialFunction.Intersection);
+            bool overlap = !common.IsEmpty &&
+                AreaSquareMeters(common) >= MinTakeoverAreaSquareMeters;
+
+            if (!overlap && SharedBorderMeters(a, b) < MinSharedEdgeMeters)
+                return null;
+
+            var union = Overlay(a, b, SpatialFunction.Union);
+            return union is Polygon merged && merged.IsValid && !merged.IsEmpty
+                ? merged
+                : null;
+        }
+
+        // Length in metres of the border two polygons have in common.
+        private double SharedBorderMeters(Polygon a, Polygon b)
+        {
+            double tolerance = SharedEdgeToleranceMeters / MetersPerDegree;
+            var shared = Overlay(a.Boundary, b.Boundary.Buffer(tolerance),
+                SpatialFunction.Intersection);
+
+            double meters = 0;
+            for (int i = 0; i < shared.NumGeometries; i++)
+            {
+                if (shared.GetGeometryN(i) is not LineString line)
+                    continue;
+
+                for (int j = 1; j < line.NumPoints; j++)
+                {
+                    var from = line.GetCoordinateN(j - 1);
+                    var to = line.GetCoordinateN(j);
+                    meters += _gpsDistanceService.CalculateDistance(
+                        from.Y, from.X, to.Y, to.X);
+                }
+            }
+
+            return meters;
+        }
+
+        // Failed Finish processing is retried automatically by the hourly
+        // job only for runs that ended within the retry window. Older runs
+        // can still be retried by the owner calling /end again.
+        public const int DefaultFailedRetryWindowDays = 3;
+
+        public static bool IsAutoRetryDue(
+            string runStatus, string validationStatus, DateTime? endedAt,
+            DateTime now, int retryWindowDays)
+        {
+            return runStatus == "Completed" &&
+                validationStatus == RunValidationStatuses.Failed &&
+                endedAt.HasValue &&
+                endedAt.Value > now.AddDays(-retryWindowDays);
+        }
+
+        // New shield end after qualifying activity at activityTime (FR-18).
+        // Counts from the activity itself, so a delayed retry gives no extra
+        // protection, and never shortens a longer existing shield. Null when
+        // the activity is too old to protect anything any more.
+        public static DateTime? RenewedShieldExpiry(
+            DateTime? existing, DateTime activityTime, DateTime now)
+        {
+            var renewed = activityTime.AddDays(ShieldDays);
+            if (renewed <= now)
+                return null;
+
+            return existing.HasValue && existing.Value > renewed
+                ? existing.Value
+                : renewed;
+        }
+
+        // Taking another runner's land during a run would change their
+        // territory on everyone's map and reveal the route, so such a claim
+        // waits until Finish. A claim that takes no one's land applies live.
+        public static bool ShouldPostponeClaim(
+            ClaimResolution resolution, bool runIsFinishing)
+        {
+            return !runIsFinishing && resolution.Takeovers.Count > 0;
         }
 
         // ----- Shield refresh, map colour and owner privacy -----
@@ -922,15 +1149,37 @@ namespace ILAQA.Services
                 point.AccuracyMeters.Value <= MaxAccuracyMeters;
         }
 
-        // Polygons in a geometry that are big and wide enough to own.
-        private List<Polygon> ValidPieces(Geometry geometry)
+        // Polygons in a geometry that are big and wide enough to own and
+        // safe to save (SRS 7.3): valid, non-empty, SRID 4326. Valid pieces
+        // are returned unchanged. An invalid piece (e.g. a self-touching
+        // ring left by an overlay) is repaired with NTS GeometryFixer and
+        // its parts must pass the same area and width rules, so land is
+        // neither invented nor silently dropped.
+        public List<Polygon> StorablePieces(Geometry geometry)
         {
             var pieces = new List<Polygon>();
+            CollectStorablePieces(geometry, pieces, repairAllowed: true);
+            return pieces;
+        }
 
+        private void CollectStorablePieces(
+            Geometry geometry, List<Polygon> pieces, bool repairAllowed)
+        {
             for (int i = 0; i < geometry.NumGeometries; i++)
             {
                 if (geometry.GetGeometryN(i) is not Polygon piece ||
                     piece.IsEmpty)
+                    continue;
+
+                if (!piece.IsValid)
+                {
+                    if (repairAllowed)
+                        CollectStorablePieces(
+                            GeometryFixer.Fix(piece), pieces, repairAllowed: false);
+                    continue;
+                }
+
+                if (piece.SRID != 4326)
                     continue;
 
                 double area = CalculateTerritoryArea(piece);
@@ -942,8 +1191,6 @@ namespace ILAQA.Services
                     pieces.Add(piece);
                 }
             }
-
-            return pieces;
         }
 
         // Approximate area in m² of any longitude/latitude geometry.
@@ -1005,6 +1252,9 @@ namespace ILAQA.Services
         // Cleaned walking/running distance (0 for vehicle runs).
         public double GenuineDistanceMeters { get; set; }
     }
+
+    // End time and active seconds decided at Finish.
+    public sealed record FinishTiming(DateTime EndedAt, int ActiveSeconds);
 
     // One claim decision to save in TerritoryClaims.
     public sealed class PlannedClaim

@@ -14,10 +14,22 @@ export type SyncResult = {
   newlyClaimedCount: number;
   confirmedTerritories: ConfirmedTerritory[];
   serverEnded: boolean;
+  // True only for the sync that completed /end.
+  endedNow: boolean;
 };
+
+// The server limits GPS uploads per user (HTTP 429 + Retry-After). Points
+// stay in SQLite and the upload cursor only moves after an accepted batch,
+// so waiting loses nothing.
+export class SyncRateLimitedError extends Error {}
+let uploadsPausedUntil = 0;
+
+// Points per upload request (server maximum is 500).
+const UPLOAD_BATCH_SIZE = 250;
 
 let refreshInFlight: Promise<string> | null = null;
 const syncing = new Map<string, Promise<SyncResult>>();
+const lastSyncStartedAt = new Map<string, number>();
 
 async function renewAccessToken(): Promise<string> {
   if (!refreshInFlight) {
@@ -65,6 +77,14 @@ async function postJson(path: string, body?: unknown): Promise<any> {
     token = await renewAccessToken();
     response = await send(token);
   }
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get('Retry-After'));
+    const waitSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : 30;
+    uploadsPausedUntil = Date.now() + waitSeconds * 1000;
+    throw new SyncRateLimitedError(
+      `Server busy: GPS kept on phone, retrying in ${waitSeconds} s.`
+    );
+  }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     throw new Error(
@@ -82,6 +102,7 @@ async function syncOnce(runId: string): Promise<SyncResult> {
       newlyClaimedCount: 0,
       confirmedTerritories: [],
       serverEnded: true,
+      endedNow: false,
     };
   }
 
@@ -100,8 +121,16 @@ async function syncOnce(runId: string): Promise<SyncResult> {
 
   // Keep each request below the ASP.NET endpoint's 500-point limit.
   for (;;) {
-    const batch = await getUnuploadedRunPoints(runId, lastUploadedId, 100);
+    const batch = await getUnuploadedRunPoints(
+      runId,
+      lastUploadedId,
+      UPLOAD_BATCH_SIZE
+    );
     if (batch.length === 0) break;
+    // Only point uploads are limited: a pending Finish still goes out.
+    if (Date.now() < uploadsPausedUntil) {
+      throw new SyncRateLimitedError('Waiting before the next GPS upload.');
+    }
 
     const response = await postJson(
       `/api/runs/${runId}/points`,
@@ -132,7 +161,18 @@ async function syncOnce(runId: string): Promise<SyncResult> {
   // Read state again: Finish may have been pressed during an upload.
   const latest = await getRunSyncRecord(runId);
   if (latest?.finishRequested) {
-    const response = await postJson(`/api/runs/${runId}/end`);
+    // When Finish was pressed and the phone's running time; the server
+    // checks both against the GPS (works for an offline Finish too).
+    const hasTiming = latest.endedAt !== null || latest.activeSeconds !== null;
+    const response = await postJson(
+      `/api/runs/${runId}/end`,
+      hasTiming
+        ? {
+            endedAt: latest.endedAt ?? undefined,
+            activeSeconds: latest.activeSeconds ?? undefined,
+          }
+        : undefined
+    );
     if (Array.isArray(response.detectedTerritories)) {
       confirmedTerritories = response.detectedTerritories;
       await cacheConfirmedTerritories(
@@ -146,6 +186,7 @@ async function syncOnce(runId: string): Promise<SyncResult> {
       newlyClaimedCount: totalNewClaims,
       confirmedTerritories,
       serverEnded: true,
+      endedNow: true,
     };
   }
 
@@ -153,11 +194,29 @@ async function syncOnce(runId: string): Promise<SyncResult> {
     newlyClaimedCount: totalNewClaims,
     confirmedTerritories,
     serverEnded: false,
+    endedNow: false,
   };
 }
 
-// One sync at a time per run in the main JS runtime.
-export async function syncRun(runId: string): Promise<SyncResult> {
+// One sync at a time per run in the main JS runtime. minIntervalMs skips a
+// sync that comes too soon after the previous one (the background GPS task
+// fires on every fix, every 1-3 s while running).
+export async function syncRun(
+  runId: string,
+  options: { minIntervalMs?: number } = {}
+): Promise<SyncResult> {
+  const now = Date.now();
+  const last = lastSyncStartedAt.get(runId) ?? 0;
+  if (options.minIntervalMs && now - last < options.minIntervalMs) {
+    return {
+      newlyClaimedCount: 0,
+      confirmedTerritories: [],
+      serverEnded: false,
+      endedNow: false,
+    };
+  }
+  lastSyncStartedAt.set(runId, now);
+
   const existing = syncing.get(runId);
   if (existing) {
     const result = await existing;
@@ -176,16 +235,21 @@ export async function syncRun(runId: string): Promise<SyncResult> {
 }
 
 // Used after app restart/reconnection to retry unsent runs for this user.
-export async function syncPendingRuns(ownerUserId: string): Promise<void> {
+// Returns how many runs finished syncing now (their routes changed).
+export async function syncPendingRuns(ownerUserId: string): Promise<number> {
   const pending = await getPendingRunIds(ownerUserId);
+  let endedNow = 0;
   for (const runId of pending) {
     try {
-      await syncRun(runId);
+      const result = await syncRun(runId);
+      if (result.endedNow) endedNow++;
     } catch (error) {
       console.log('ILAQA sync pending:', runId, String(error));
       // Leave the queue untouched, retry later.
+      if (error instanceof SyncRateLimitedError) break;
     }
   }
+  return endedNow;
 }
 export async function fetchSavedTerritories(): Promise<ConfirmedTerritory[]> {
   let token = await SecureStore.getItemAsync('accessToken');

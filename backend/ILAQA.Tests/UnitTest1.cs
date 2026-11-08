@@ -1,6 +1,11 @@
 ﻿using ILAQA.Models;
 using ILAQA.Services;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using NetTopologySuite.Geometries;
+using Microsoft.AspNetCore.Http;
+using System.Net;
+using System.Security.Claims;
 using Xunit;
 
 namespace ILAQA.Tests
@@ -1282,6 +1287,61 @@ namespace ILAQA.Tests
             Assert.Empty(result.AwardedPieces);
         }
 
+        // ----- Live takeover guard (fix #1) -----
+        // Taking a rival's land during a run would change their territory on
+        // everyone's map and reveal the runner's route. Such a claim waits
+        // until Finish. A claim that takes no one's land still applies live.
+
+        [Fact]
+        public void ClaimOverVulnerableLandDuringRun_ShouldBePostponed()
+        {
+            var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
+                Now.AddDays(-1));
+
+            var result = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
+
+            Assert.True(TerritoryDetectionService.ShouldPostponeClaim(
+                result, runIsFinishing: false));
+        }
+
+        [Fact]
+        public void ClaimOverVulnerableLandAtFinish_ShouldBeApplied()
+        {
+            var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
+                Now.AddDays(-1));
+
+            var result = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
+
+            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
+                result, runIsFinishing: true));
+        }
+
+        [Fact]
+        public void ClaimOnFreeLandDuringRun_ShouldApplyLive()
+        {
+            var result = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory>(), Now);
+
+            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
+                result, runIsFinishing: false));
+        }
+
+        // Shielded rival land is never taken, so the free part applies live.
+        [Fact]
+        public void ClaimOverShieldedLandDuringRun_ShouldApplyFreePartLive()
+        {
+            var shielded = Owned(Rival, Rect(-50, 0, 50, 100), "Active",
+                Now.AddDays(2));
+
+            var result = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { shielded }, Now);
+
+            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
+                result, runIsFinishing: false));
+        }
+
         // ----- Shield and overlap helpers -----
 
         private const double OriginLatitude = 24.8600;
@@ -1546,6 +1606,38 @@ namespace ILAQA.Tests
         }
 
         // Guard: a short 40 m dropout is still bridged.
+        // FR-11: GPS lost for 10 minutes while the runner moved 100 m. The
+        // straight line across the gap was never run, so it must not close
+        // a territory (it did before: any jump up to 150 m was joined).
+        [Fact]
+        public void LongGpsGapWithMovement_ShouldNotInventTheMissingSide()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .JumpTo(0, 100, 600)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            Assert.Empty(Service().FindTerritories(points));
+        }
+
+        // Standing still for 10 minutes: no fixes arrive (5 m distance
+        // filter) and the next fix wobbles a few metres. Still one loop.
+        [Fact]
+        public void LongStopWithGpsWobble_ShouldStillClaimLoop()
+        {
+            var points = new Route()
+                .To(60, 0, WalkSpeed)
+                .To(60, 60, WalkSpeed)
+                .JumpTo(63, 64, 600)
+                .To(0, 60, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            Assert.Single(Service().FindTerritories(points));
+        }
+
         [Fact]
         public void ShortGpsDropout_ShouldStillClaimLoop()
         {
@@ -1907,6 +1999,596 @@ namespace ILAQA.Tests
         {
             Assert.True(TerritoryDetectionService.IsVisibleOnMap(
                 Rival, null, Me));
+        }
+
+        // ----- Run validation status at Finish (UC-02, UC-06) -----
+
+        [Fact]
+        public void FinishedRunWithApprovedClaim_ShouldBeValidated()
+        {
+            Assert.Equal(RunValidationStatuses.Validated,
+                TerritoryDetectionService.DecideValidationStatus(
+                    processingSucceeded: true, approvedClaimCount: 1));
+        }
+
+        [Fact]
+        public void FinishedRunWithoutApprovedClaim_ShouldBeNoClaim()
+        {
+            Assert.Equal(RunValidationStatuses.NoClaim,
+                TerritoryDetectionService.DecideValidationStatus(
+                    processingSucceeded: true, approvedClaimCount: 0));
+        }
+
+        // Land won during live uploads does not hide a failed Finish.
+        [Fact]
+        public void FailedTerritoryProcessing_ShouldBeFailedEvenWithEarlierClaims()
+        {
+            Assert.Equal(RunValidationStatuses.Failed,
+                TerritoryDetectionService.DecideValidationStatus(
+                    processingSucceeded: false, approvedClaimCount: 2));
+        }
+
+        // The ERD stores ValidationStatus as varchar(20).
+        [Fact]
+        public void ValidationStatusValues_ShouldFitTheErdColumn()
+        {
+            Assert.All(new[]
+            {
+                RunValidationStatuses.Pending, RunValidationStatuses.Validated,
+                RunValidationStatuses.NoClaim, RunValidationStatuses.Failed
+            }, value => Assert.InRange(value.Length, 1, 20));
+        }
+
+        // ----- Recovery of failed territory processing (UC-05/UC-07) -----
+
+        private static readonly DateTime RunEnd =
+            new(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+
+        [Fact]
+        public void FailedRunInsideRetryWindow_ShouldBeRetried()
+        {
+            Assert.True(TerritoryDetectionService.IsAutoRetryDue(
+                "Completed", RunValidationStatuses.Failed, RunEnd,
+                RunEnd.AddDays(2), retryWindowDays: 3));
+        }
+
+        [Fact]
+        public void FailedRunOlderThanRetryWindow_ShouldNotBeRetriedAutomatically()
+        {
+            Assert.False(TerritoryDetectionService.IsAutoRetryDue(
+                "Completed", RunValidationStatuses.Failed, RunEnd,
+                RunEnd.AddDays(4), retryWindowDays: 3));
+        }
+
+        [Fact]
+        public void ProcessedRun_ShouldNeverBeRetried()
+        {
+            Assert.False(TerritoryDetectionService.IsAutoRetryDue(
+                "Completed", RunValidationStatuses.Validated, RunEnd,
+                RunEnd.AddHours(1), retryWindowDays: 3));
+            Assert.False(TerritoryDetectionService.IsAutoRetryDue(
+                "Running", RunValidationStatuses.Pending, RunEnd,
+                RunEnd.AddHours(1), retryWindowDays: 3));
+        }
+
+        // A retry renews shields from the run's own end, not from the
+        // moment the retry happens.
+        [Fact]
+        public void RetriedShieldRenewal_ShouldCountFromRunEnd()
+        {
+            var expiry = TerritoryDetectionService.RenewedShieldExpiry(
+                existing: null, activityTime: RunEnd, now: RunEnd.AddDays(1));
+
+            Assert.Equal(RunEnd.AddDays(3), expiry);
+        }
+
+        [Fact]
+        public void ShieldRenewal_ShouldNeverShortenALongerShield()
+        {
+            var longer = RunEnd.AddDays(5);
+
+            Assert.Equal(longer, TerritoryDetectionService.RenewedShieldExpiry(
+                existing: longer, activityTime: RunEnd, now: RunEnd.AddHours(1)));
+        }
+
+        // Activity more than 3 days ago no longer protects anything.
+        [Fact]
+        public void ShieldRenewalFromAnOldRun_ShouldNotRenew()
+        {
+            Assert.Null(TerritoryDetectionService.RenewedShieldExpiry(
+                existing: null, activityTime: RunEnd, now: RunEnd.AddDays(4)));
+        }
+
+        // ----- Performance (NFR-08: validation within 5 seconds) -----
+
+        // A 5,000-point walk round a street grid with smooth GPS wobble
+        // (thousands of tiny faces). Measured 8 Nov: ~2 s before indexing
+        // the route points, ~0.45 s after (Release build).
+        private static List<RunGpsPoint> LongGridWalk(int count, double wobble)
+        {
+            var random = new Random(7);
+            var points = new List<RunGpsPoint>();
+            double x = 0, y = 0, dx = 0, dy = 0, legMeters = 0;
+            int direction = 0;
+            var time = new DateTime(2026, 11, 6, 6, 0, 0, DateTimeKind.Utc);
+
+            for (int i = 0; i < count; i++)
+            {
+                legMeters += 5;
+                if (legMeters >= 200)
+                {
+                    legMeters = 0;
+                    direction = (direction + (random.Next(4) == 0 ? 3 : 1)) % 4;
+                }
+                x += direction == 0 ? 5 : direction == 2 ? -5 : 0;
+                y += direction == 1 ? 5 : direction == 3 ? -5 : 0;
+                dx = dx * 0.8 + (random.NextDouble() - 0.5) * wobble;
+                dy = dy * 0.8 + (random.NextDouble() - 0.5) * wobble;
+                time = time.AddSeconds(2);
+
+                points.Add(new RunGpsPoint
+                {
+                    SequenceNo = i + 1,
+                    LegNo = 1,
+                    Latitude = OriginLatitude + (y + dy) / MetersPerDegree,
+                    Longitude = OriginLongitude + (x + dx) / MetersPerDegreeLongitude,
+                    AccuracyMeters = 5 + random.NextDouble() * 10,
+                    RecordedAt = time
+                });
+            }
+
+            return points;
+        }
+
+        [Fact]
+        public void FiveThousandPointRun_ShouldBeAnalysedWellInsideFiveSeconds()
+        {
+            var points = LongGridWalk(5000, wobble: 3);
+            var service = Service();
+            service.AnalyzeRun(LongGridWalk(200, wobble: 3));
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var analysis = service.AnalyzeRun(points);
+            watch.Stop();
+
+            Assert.NotEmpty(analysis.Accepted);
+            Assert.True(watch.ElapsedMilliseconds < 2500,
+                $"Analysis took {watch.ElapsedMilliseconds} ms.");
+        }
+
+        // ----- Profile visibility default (Muneeb's decision, 8 Nov) -----
+
+        // New accounts are public: other runners see their name on land.
+        // Runners can still switch to private in their profile.
+        [Fact]
+        public void NewAccount_ShouldBePublicByDefault()
+        {
+            Assert.True(new ApplicationUser().IsProfilePublic);
+        }
+
+        // ----- Per-user GPS upload limit (NFR-05) -----
+
+        private static System.Threading.RateLimiting.RateLimiter UploadLimiterFor(
+            string? userId, int perMinute)
+        {
+            var context = new DefaultHttpContext();
+            if (userId != null)
+                context.User = new ClaimsPrincipal(new ClaimsIdentity(
+                    new[] { new Claim(ClaimTypes.NameIdentifier, userId) }, "test"));
+
+            var partition = GpsUploadRateLimit.Partition(context, perMinute);
+            return partition.Factory(partition.PartitionKey);
+        }
+
+        [Fact]
+        public void GpsUploads_ShouldBeLimitedPerUserPerMinute()
+        {
+            using var limiter = UploadLimiterFor(Me, perMinute: 20);
+
+            for (int i = 0; i < 20; i++)
+                Assert.True(limiter.AttemptAcquire().IsAcquired);
+
+            Assert.False(limiter.AttemptAcquire().IsAcquired);
+        }
+
+        [Fact]
+        public void GpsUploadLimit_ShouldBeSeparateForEachUser()
+        {
+            var context = new DefaultHttpContext();
+            context.User = new ClaimsPrincipal(new ClaimsIdentity(
+                new[] { new Claim(ClaimTypes.NameIdentifier, Me) }, "test"));
+            var other = new DefaultHttpContext();
+            other.User = new ClaimsPrincipal(new ClaimsIdentity(
+                new[] { new Claim(ClaimTypes.NameIdentifier, Rival) }, "test"));
+
+            Assert.NotEqual(
+                GpsUploadRateLimit.Partition(context, 20).PartitionKey,
+                GpsUploadRateLimit.Partition(other, 20).PartitionKey);
+        }
+
+        // ----- Finish timing: endedAt and active time (UC-02) -----
+
+        private static readonly DateTime Started =
+            new(2026, 11, 6, 8, 0, 0, DateTimeKind.Utc);
+
+        // Two legs: 08:00-08:10 and 08:20-08:30 (a 10 minute pause).
+        private static List<RunGpsPoint> TwoLegs() => new()
+        {
+            Fix(1, 1, Started),
+            Fix(2, 1, Started.AddMinutes(10)),
+            Fix(3, 2, Started.AddMinutes(20)),
+            Fix(4, 2, Started.AddMinutes(30))
+        };
+
+        private static RunGpsPoint Fix(int sequence, int leg, DateTime at) => new()
+        {
+            SequenceNo = sequence, LegNo = leg, RecordedAt = at,
+            Latitude = OriginLatitude, Longitude = OriginLongitude,
+            AccuracyMeters = 5
+        };
+
+        // Finish pressed offline at 08:31, synced at 11:00.
+        [Fact]
+        public void OfflineFinish_ShouldUseThePhonesEndTimeAndActiveTime()
+        {
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                Started, serverNow: Started.AddHours(3), serverActiveSeconds: 10800,
+                clientEndedAt: Started.AddMinutes(31), clientActiveSeconds: 1230,
+                TwoLegs());
+
+            Assert.Equal(Started.AddMinutes(31), timing.EndedAt);
+            Assert.Equal(1230, timing.ActiveSeconds);
+        }
+
+        // Old app without a body: the server time stays, but the 10 minute
+        // pause seen between the legs is not counted as running.
+        [Fact]
+        public void FinishWithoutClientTiming_ShouldNotCountThePauseBetweenLegs()
+        {
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                Started, serverNow: Started.AddMinutes(31), serverActiveSeconds: 1860,
+                clientEndedAt: null, clientActiveSeconds: null, TwoLegs());
+
+            Assert.Equal(Started.AddMinutes(31), timing.EndedAt);
+            Assert.Equal(1860 - 600 + 60, timing.ActiveSeconds);
+        }
+
+        [Fact]
+        public void ActiveTimeLongerThanTheRun_ShouldBeCapped()
+        {
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                Started, Started.AddMinutes(40), 0,
+                Started.AddMinutes(31), clientActiveSeconds: 99999, TwoLegs());
+
+            Assert.Equal(1860 - 600 + 60, timing.ActiveSeconds);
+        }
+
+        // 20 minutes of recorded running cannot be reported as 5 minutes.
+        [Fact]
+        public void ActiveTimeShorterThanRecordedRunning_ShouldBeRaised()
+        {
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                Started, Started.AddMinutes(40), 0,
+                Started.AddMinutes(31), clientActiveSeconds: 300, TwoLegs());
+
+            Assert.Equal(1200, timing.ActiveSeconds);
+        }
+
+        [Fact]
+        public void EndTimeBeforeTheLastGpsPoint_ShouldMoveToThatPoint()
+        {
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                Started, Started.AddMinutes(40), 0,
+                Started.AddMinutes(25), null, TwoLegs());
+
+            Assert.Equal(Started.AddMinutes(30), timing.EndedAt);
+        }
+
+        [Fact]
+        public void EndTimeInTheFutureOrNotUtc_ShouldFallBackToServerTime()
+        {
+            var now = Started.AddMinutes(40);
+
+            Assert.Equal(now, TerritoryDetectionService.ResolveFinishTiming(
+                Started, now, 0, now.AddMinutes(10), null, TwoLegs()).EndedAt);
+            Assert.Equal(now, TerritoryDetectionService.ResolveFinishTiming(
+                Started, now, 0, DateTime.SpecifyKind(
+                    Started.AddMinutes(31), DateTimeKind.Local), null, TwoLegs()).EndedAt);
+            Assert.Equal(now, TerritoryDetectionService.ResolveFinishTiming(
+                Started, now, 0, Started.AddMinutes(-5), null,
+                new List<RunGpsPoint>()).EndedAt);
+        }
+
+        // ----- Merging adjacent land of one owner (UC-07 alternate) -----
+
+        [Fact]
+        public void AdjacentOwnLand_SharingAnEdge_ShouldMergeIntoOnePolygon()
+        {
+            var merged = Service().MergedBoundary(
+                Rect(0, 0, 100, 100), Rect(100, 0, 200, 100));
+
+            Assert.NotNull(merged);
+            Assert.True(merged!.IsValid);
+            Assert.InRange(AreaOf(merged), 19800, 20200);
+        }
+
+        [Fact]
+        public void LandTouchingOnlyAtACorner_ShouldNotMerge()
+        {
+            Assert.Null(Service().MergedBoundary(
+                Rect(0, 0, 100, 100), Rect(100, 100, 200, 200)));
+        }
+
+        // A shared edge shorter than the minimum territory width (16 m) is
+        // not a meaningful border.
+        [Fact]
+        public void LandSharingOnlyAShortEdge_ShouldNotMerge()
+        {
+            Assert.Null(Service().MergedBoundary(
+                Rect(0, 0, 100, 100), Rect(100, 90, 200, 190)));
+        }
+
+        [Fact]
+        public void LandSharingALongEnoughEdge_ShouldMerge()
+        {
+            Assert.NotNull(Service().MergedBoundary(
+                Rect(0, 0, 100, 100), Rect(100, 80, 200, 180)));
+        }
+
+        [Fact]
+        public void SeparateLand_ShouldNotMerge()
+        {
+            Assert.Null(Service().MergedBoundary(
+                Rect(0, 0, 100, 100), Rect(130, 0, 230, 100)));
+        }
+
+        // Merging never changes protection: only land with the same owner,
+        // status and shield end can merge.
+        [Fact]
+        public void OnlyLandWithTheSameOwnerStatusAndShield_ShouldMerge()
+        {
+            var shield = Now.AddDays(3);
+            var a = Owned(Me, Rect(0, 0, 100, 100), "Active", shield);
+
+            Assert.True(TerritoryDetectionService.CanMerge(
+                a, Owned(Me, Rect(100, 0, 200, 100), "Active", shield)));
+            Assert.False(TerritoryDetectionService.CanMerge(
+                a, Owned(Me, Rect(100, 0, 200, 100), "Active", shield.AddDays(-1))));
+            Assert.False(TerritoryDetectionService.CanMerge(
+                a, Owned(Me, Rect(100, 0, 200, 100), "Vulnerable", shield)));
+            Assert.False(TerritoryDetectionService.CanMerge(
+                a, Owned(Rival, Rect(100, 0, 200, 100), "Active", shield)));
+        }
+
+        // ----- Final polygon checks before saving (SRS 7.3) -----
+
+        private static Polygon Ring(params (double x, double y)[] corners)
+        {
+            Coordinate At(double x, double y) => new(
+                OriginLongitude + x / MetersPerDegreeLongitude,
+                OriginLatitude + y / MetersPerDegree);
+
+            var factory = new GeometryFactory(new PrecisionModel(), 4326);
+            return factory.CreatePolygon(corners
+                .Append(corners[0])
+                .Select(c => At(c.x, c.y))
+                .ToArray());
+        }
+
+        [Fact]
+        public void ValidPiece_ShouldBeStoredUnchanged()
+        {
+            var square = Rect(0, 0, 100, 100);
+
+            var piece = Assert.Single(Service().StorablePieces(square));
+
+            Assert.True(piece.EqualsExact(square));
+        }
+
+        [Fact]
+        public void EmptyGeometry_ShouldGiveNoPieces()
+        {
+            var empty = new GeometryFactory(new PrecisionModel(), 4326)
+                .CreatePolygon();
+
+            Assert.Empty(Service().StorablePieces(empty));
+        }
+
+        // A self-touching "bow tie" is invalid; its two real lobes are kept
+        // rather than silently dropping the land.
+        [Fact]
+        public void InvalidBowTie_ShouldBeRepairedIntoValidPieces()
+        {
+            var bowTie = Ring((0, 0), (100, 100), (100, 0), (0, 100));
+            Assert.False(bowTie.IsValid);
+
+            var pieces = Service().StorablePieces(bowTie);
+
+            Assert.Equal(2, pieces.Count);
+            Assert.All(pieces, piece =>
+            {
+                Assert.True(piece.IsValid);
+                Assert.Equal(4326, piece.SRID);
+                Assert.InRange(AreaOf(piece), 2400, 2600);
+            });
+        }
+
+        // Overlaps can leave slivers; only real land survives.
+        [Fact]
+        public void FragmentedGeometry_ShouldKeepOnlyOwnablePieces()
+        {
+            var factory = new GeometryFactory(new PrecisionModel(), 4326);
+            var fragments = factory.CreateMultiPolygon(new[]
+            {
+                Rect(0, 0, 100, 100),
+                Rect(200, 0, 300, 3)
+            });
+
+            var piece = Assert.Single(Service().StorablePieces(fragments));
+
+            Assert.InRange(AreaOf(piece), 9900, 10100);
+        }
+
+        // Every awarded and remaining piece is valid and in SRID 4326.
+        [Fact]
+        public void TakeoverPieces_ShouldAllBeStorable()
+        {
+            var vulnerable = Owned(Rival, Rect(-50, 30, 150, 70), "Vulnerable",
+                Now.AddDays(-1));
+
+            var result = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
+
+            var all = result.AwardedPieces
+                .Concat(result.Takeovers.SelectMany(t => t.RemainingPieces));
+            Assert.All(all, piece =>
+            {
+                Assert.True(piece.IsValid);
+                Assert.False(piece.IsEmpty);
+                Assert.Equal(4326, piece.SRID);
+            });
+        }
+
+        // ----- Official run distance (Runs.TotalDistanceMeters) -----
+
+        // One impossible 60 m spike in a 300 m walk is not counted.
+        [Fact]
+        public void GpsTeleport_ShouldNotAddToRunDistance()
+        {
+            var points = new Route()
+                .To(150, 0, 2.5)
+                .JumpTo(150, 60, 1)
+                .JumpTo(150, 0, 1)
+                .To(300, 0, 2.5)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.InRange(analysis.GenuineDistanceMeters, 295, 305);
+        }
+
+        // ----- Google Roads failures (UC-05 exception, FR-12) -----
+
+        // Answers every request with the same status and body, counting calls.
+        private sealed class FakeRoads : HttpMessageHandler
+        {
+            private readonly HttpStatusCode _status;
+            private readonly string _body;
+            public int Calls;
+
+            public FakeRoads(HttpStatusCode status, string body = "{}")
+            {
+                _status = status;
+                _body = body;
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                Calls++;
+                return Task.FromResult(new HttpResponseMessage(_status)
+                {
+                    Content = new StringContent(_body)
+                });
+            }
+        }
+
+        private static GoogleRoadsService Roads(
+            HttpMessageHandler handler, int cooldownSeconds = 0)
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["GoogleRoads:ApiKey"] = "test-key",
+                    ["GoogleRoads:FailureCooldownSeconds"] =
+                        cooldownSeconds.ToString()
+                })
+                .Build();
+
+            return new GoogleRoadsService(new HttpClient(handler),
+                configuration, NullLogger<GoogleRoadsService>.Instance);
+        }
+
+        [Fact]
+        public async Task RoadsServerError_ShouldBeReportedAsFailureNotAsNoSnap()
+        {
+            var result = await Roads(new FakeRoads(HttpStatusCode.InternalServerError))
+                .SnapAsync(Line(3));
+
+            Assert.Null(result);
+        }
+
+        // A request Google rejects for good (e.g. 400 for one bad stretch)
+        // must not be retried forever nor pause snapping for everyone.
+        [Fact]
+        public async Task RoadsPermanentRejection_ShouldCountAsCheckedWithoutPausing()
+        {
+            var rejected = await Roads(new FakeRoads(HttpStatusCode.BadRequest), 60)
+                .SnapAsync(Line(3));
+
+            Assert.NotNull(rejected);
+            Assert.Empty(rejected!);
+
+            var healthy = new FakeRoads(HttpStatusCode.OK, "{}");
+            await Roads(healthy, cooldownSeconds: 60).SnapAsync(Line(3));
+            Assert.Equal(1, healthy.Calls);
+        }
+
+        [Fact]
+        public async Task RoadsAnswerWithoutSnappedPoints_ShouldBeASuccessWithNoPoints()
+        {
+            var result = await Roads(new FakeRoads(HttpStatusCode.OK, "{}"))
+                .SnapAsync(Line(3));
+
+            Assert.NotNull(result);
+            Assert.Empty(result!);
+        }
+
+        // During an outage Google is not called again for every upload.
+        [Fact]
+        public async Task RoadsFailure_ShouldPauseFurtherCallsDuringCooldown()
+        {
+            var failing = new FakeRoads(HttpStatusCode.ServiceUnavailable);
+            await Roads(failing, cooldownSeconds: 60).SnapAsync(Line(3));
+
+            var healthy = new FakeRoads(HttpStatusCode.OK, "{}");
+            var second = await Roads(healthy, cooldownSeconds: 60).SnapAsync(Line(3));
+
+            Assert.Null(second);
+            Assert.Equal(0, healthy.Calls);
+
+            // A successful call clears the pause for everyone.
+            await Roads(new FakeRoads(HttpStatusCode.OK, "{}"), 0).SnapAsync(Line(3));
+            var after = new FakeRoads(HttpStatusCode.OK, "{}");
+            await Roads(after, cooldownSeconds: 60).SnapAsync(Line(3));
+            Assert.Equal(1, after.Calls);
+        }
+
+        // Snapping moves points only inside their accuracy circle, so an
+        // out-and-back street pulled onto one road line still encloses
+        // nothing.
+        [Fact]
+        public void SnappedOutAndBack_ShouldStillNotBecomeTerritory()
+        {
+            var points = new Route()
+                .To(150, 0, 2.5)
+                .To(150, 12, 2.5)
+                .To(0, 12, 2.5)
+                .Build();
+            foreach (var point in points)
+                point.AccuracyMeters = 25;
+
+            var snapped = Service().ApplySnappedPoints(points, points
+                .Select((p, i) => Snapped(i, p, northMeters: 0))
+                .Select((s, i) => new SnappedRoadPoint
+                {
+                    OriginalIndex = i,
+                    Latitude = points[0].Latitude,
+                    Longitude = s.Longitude
+                })
+                .ToList());
+
+            Assert.Empty(Service().FindTerritories(snapped));
         }
 
         // Smooth, realistic GPS drift (not random jumps): each point is

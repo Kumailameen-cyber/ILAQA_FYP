@@ -10,6 +10,9 @@ namespace ILAQA.Models
         public const string Split = "Split";
         public const string ShieldRestored = "ShieldRestored";
         public const string BecameVulnerable = "BecameVulnerable";
+
+        // Adjacent land of one owner combined into the older territory.
+        public const string Merged = "Merged";
     }
 
     // History of territory changes: claims, takeovers, splits, merges

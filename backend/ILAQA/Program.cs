@@ -128,6 +128,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<GpsDistanceService>();
 builder.Services.AddScoped<TerritoryDetectionService>();
+builder.Services.AddScoped<TerritoryClaimService>();
 builder.Services.AddHttpClient<GoogleRoadsService>(client =>
     client.Timeout = TimeSpan.FromSeconds(5))
     // The request URL contains the Google key: never log it.
@@ -157,6 +158,25 @@ builder.Services.AddRateLimiter(options =>
                 AutoReplenishment = true
             });
     });
+
+    // GPS uploads, per signed-in user (NFR-05).
+    int gpsUploadsPerMinute = builder.Configuration.GetValue(
+        "RateLimiting:GpsUploadsPerMinute",
+        GpsUploadRateLimit.DefaultUploadsPerMinute);
+    options.AddPolicy(GpsUploadRateLimit.PolicyName, context =>
+        GpsUploadRateLimit.Partition(context, gpsUploadsPerMinute));
+
+    // Tell clients when to try again.
+    options.OnRejected = (context, _) =>
+    {
+        if (context.Lease.TryGetMetadata(
+                MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter =
+                ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString();
+        }
+        return ValueTask.CompletedTask;
+    };
 });
 builder.Services.AddCors(options =>
 {
@@ -223,8 +243,10 @@ else
     app.UseHttpsRedirection();
 }
 
-app.UseRateLimiter();
+// After authentication, so the GPS upload limit can see the user.
+// The login limit is per IP address and is not affected by the order.
 app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapControllers();
