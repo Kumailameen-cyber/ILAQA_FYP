@@ -2,10 +2,9 @@
 // Finds valid closed loops. A GPS gap or pause separates the route into sections.
 // This file creates PREVIEWS only. The ASP.NET backend must approve real claims.
 
-export type GpsCoordinate = {
-  latitude: number;
-  longitude: number;
-};
+import { calculateGpsDistance, EARTH_RADIUS_METERS, type GpsCoordinate } from './geo';
+
+export type { GpsCoordinate };
 
 export type TerritoryCandidate = {
   startIndex: number;
@@ -20,7 +19,6 @@ export type LegGpsPoint = GpsCoordinate & {
   accuracy?: number | null;
 };
 
-const EARTH_RADIUS = 6371000;
 const CLOSE_ENOUGH_METERS = 15;
 const MIN_AREA_SQUARE_METERS = 100;
 const MIN_LOOP_POINTS = 4;
@@ -34,25 +32,17 @@ function samePoint(a: GpsCoordinate, b: GpsCoordinate): boolean {
   return a.latitude === b.latitude && a.longitude === b.longitude;
 }
 
-// 1. Calculate distance between two GPS coordinates (Haversine).
-export function calculateGpsDistance(a: GpsCoordinate, b: GpsCoordinate): number {
-  const lat = radians(b.latitude - a.latitude);
-  const lon = radians(b.longitude - a.longitude);
-  const h = Math.sin(lat / 2) ** 2 +
-    Math.cos(radians(a.latitude)) * Math.cos(radians(b.latitude)) *
-    Math.sin(lon / 2) ** 2;
-  return 2 * EARTH_RADIUS * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
-}
+// 1. Distance between two points: calculateGpsDistance in ./geo.
 
 // 2. Estimate polygon area in square meters (shoelace formula).
-export function calculatePolygonArea(points: GpsCoordinate[]): number {
+function calculatePolygonArea(points: GpsCoordinate[]): number {
   if (points.length < 3) return 0;
 
   const averageLatitude = points.reduce((sum, p) => sum + p.latitude, 0) / points.length;
   const scale = Math.cos(radians(averageLatitude));
   const projected = points.map(p => ({
-    x: EARTH_RADIUS * radians(p.longitude) * scale,
-    y: EARTH_RADIUS * radians(p.latitude),
+    x: EARTH_RADIUS_METERS * radians(p.longitude) * scale,
+    y: EARTH_RADIUS_METERS * radians(p.latitude),
   }));
 
   let twiceArea = 0;
@@ -87,7 +77,7 @@ function edgesCross(a: GpsCoordinate, b: GpsCoordinate,
     onEdge(c, d, a) || onEdge(c, d, b);
 }
 
-export function hasSelfIntersection(points: GpsCoordinate[]): boolean {
+function hasSelfIntersection(points: GpsCoordinate[]): boolean {
   const vertices = [...points];
   if (vertices.length > 1 && samePoint(vertices[0], vertices[vertices.length - 1])) {
     vertices.pop(); // Do not count the repeated closing point twice.

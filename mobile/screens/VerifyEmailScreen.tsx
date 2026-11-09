@@ -1,5 +1,7 @@
+// Verify email: enter the six-digit code sent after registration, resend
+// it, or register again when the 24-hour registration has expired.
 
-import React, { useState,useEffect  } from 'react';
+import { useState } from 'react';
 import {
   View,
   Text,
@@ -11,9 +13,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import AppPopup from '../components/AppPopup';
-
-import { API_URL } from '../config/api';
+import { MessagePopup, usePopup } from '../components/AppPopup';
+import { signInStyles } from '../components/authStyles';
+import { useOtpCode } from '../hooks/useOtpCode';
+import { postJson, TOO_MANY_REQUESTS_MESSAGE } from '../services/api';
 
 type Props = {
   email: string;
@@ -25,106 +28,64 @@ type Props = {
 export default function VerifyEmailScreen({
   email,
   onVerified,
-  onBackToLogin,    
+  onBackToLogin,
   onRegisterAgain,
 }: Props) {
-  const [code, setCode] = useState('');
+  const { code, setCode, isCodeComplete, resendCountdown, restartCountdown } =
+    useOtpCode();
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
-  const [popup, setPopup] = useState<{type: 'error' | 'warning' | 'success'; title: string; message: string} | null>(null);
-  const showError = (message: string) => setPopup({type: 'error', title: 'VERIFICATION ERROR', message});
-  const showSuccess = (message: string) => setPopup({type: 'success', title: 'CODE REQUESTED', message});
-const [registrationExpired, setRegistrationExpired] = useState(false);
-const [resendCountdown, setResendCountdown] = useState(60);
+  const [registrationExpired, setRegistrationExpired] = useState(false);
+  const { popup, showPopup, closePopup } = usePopup();
 
+  const showError = (message: string) =>
+    showPopup('error', 'VERIFICATION ERROR', message);
 
-useEffect(() => {
-  if (resendCountdown <= 0) return;
-
-  const timer = setTimeout(() => {
-    setResendCountdown((previous) =>
-      Math.max(0, previous - 1)
-    );
-  }, 1000);
-
-  return () => clearTimeout(timer);
-}, [resendCountdown]);
-
-const checkRegistrationExpired = (
-  status: number,
-  message?: string
-) => {
-  if (
-    status === 410 ||
-    (message ?? '')
-      .toLowerCase()
-      .includes('registration expired')
-  ) {
-    setRegistrationExpired(true);
-    setCode('');
-    setPopup(null);
-    return true;
-  }
-
-  return false;
-};
-
+  // Shows the "registration expired" view when the server says so.
+  const checkRegistrationExpired = (status: number, message?: string) => {
+    if (
+      status === 410 ||
+      (message ?? '').toLowerCase().includes('registration expired')
+    ) {
+      setRegistrationExpired(true);
+      setCode('');
+      closePopup();
+      return true;
+    }
+    return false;
+  };
 
   const handleVerify = async () => {
     if (loading) return;
 
-    if (!/^[0-9]{6}$/.test(code)) {
+    if (!isCodeComplete) {
       showError('Enter the six-digit code from your email.');
       return;
     }
 
-    setPopup(null);
+    closePopup();
     setLoading(true);
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/verify-email`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            email: email.trim(),
-            code,
-          }),
-        }
-      );
+      const { response, data } = await postJson('/api/auth/verify-email', {
+        email: email.trim(),
+        code,
+      });
 
-     
-const data = await response.json().catch(() => null);
+      if (response.status === 429) {
+        showError(data?.message || TOO_MANY_REQUESTS_MESSAGE);
+        return;
+      }
 
-if (response.status === 429) {
-  showError(
-    data?.message ||
-      'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
-
-if (!response.ok) {
-  if (checkRegistrationExpired(response.status, data?.message)) {
-    return;
-  }
-
-  showError(
-    data?.message ||
-      'Verification failed. Check your code.'
-  );
-  return;
-}
-
+      if (!response.ok) {
+        if (checkRegistrationExpired(response.status, data?.message)) return;
+        showError(data?.message || 'Verification failed. Check your code.');
+        return;
+      }
 
       onVerified();
     } catch {
-      showError(
-        'Cannot connect to the server. Try again.'
-      );
+      showError('Cannot connect to the server. Try again.');
     } finally {
       setLoading(false);
     }
@@ -135,47 +96,31 @@ if (!response.ok) {
 
     setCode('');
     setResending(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      const response = await fetch(
-        `${API_URL}/api/auth/resend-email-otp`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email: email.trim() }),
-        }
-      );
+      const { response, data } = await postJson('/api/auth/resend-email-otp', {
+        email: email.trim(),
+      });
 
-      
-     
-const data = await response.json().catch(() => null);
+      if (response.status === 429) {
+        showError(data?.message || TOO_MANY_REQUESTS_MESSAGE);
+        return;
+      }
 
-if (response.status === 429) {
-  showError(
-    data?.message ||
-      'Too many requests. Please wait a minute before trying again.'
-  );
-  return;
-}
-
-if (!response.ok) {
-  if (checkRegistrationExpired(response.status, data?.message)) {
-    return;
-  }
-
-  showError(
-    data?.message || 'Unable to resend code.'
-  );
-  return;
-}
-
+      if (!response.ok) {
+        if (checkRegistrationExpired(response.status, data?.message)) return;
+        showError(data?.message || 'Unable to resend code.');
+        return;
+      }
 
       setCode('');
-      setResendCountdown(60);
-      showSuccess('If verification is required, a new code will be sent. Check your inbox.');
+      restartCountdown();
+      showPopup(
+        'success',
+        'CODE REQUESTED',
+        'If verification is required, a new code will be sent. Check your inbox.'
+      );
     } catch {
       showError('Connection failed. Try again.');
     } finally {
@@ -183,157 +128,112 @@ if (!response.ok) {
     }
   };
 
-  
-return (
-  <SafeAreaView style={styles.container}>
-    <StatusBar style="light" />
+  const resendDisabled = loading || resending || resendCountdown > 0;
 
-    <ScrollView
-      contentContainerStyle={styles.content}
-      keyboardShouldPersistTaps="handled"
-    >
-      <Text style={styles.logo}>ILAQA®</Text>
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar style="light" />
 
-      {registrationExpired ? (
-        <View style={styles.expiredContainer}>
-          <Text style={styles.expiredIcon}>⌛</Text>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Text style={styles.logo}>ILAQA®</Text>
 
-          <Text style={styles.expiredTitle}>
-            REGISTRATION{'\n'}
-            <Text style={styles.accent}>EXPIRED.</Text>
-          </Text>
+        {registrationExpired ? (
+          <View style={styles.expiredContainer}>
+            <Text style={styles.expiredIcon}>⌛</Text>
 
-          <Text style={styles.expiredDescription}>
-            Your 24-hour email verification period has ended.
-            Please register again to create your ILAQA account.
-          </Text>
-
-          <TouchableOpacity
-            style={styles.button}
-            onPress={onRegisterAgain}
-          >
-            <Text style={styles.buttonText}>
-              REGISTER AGAIN →
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={onBackToLogin}>
-            <Text style={styles.backText}>
-              ← Back to Sign In
-            </Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <>
-          <View style={styles.heading}>
-            <Text style={styles.title}>VERIFY YOUR</Text>
-            <Text style={[styles.title, styles.accent]}>
-              EMAIL.
+            <Text style={styles.expiredTitle}>
+              REGISTRATION{'\n'}
+              <Text style={styles.accent}>EXPIRED.</Text>
             </Text>
 
-            <Text style={styles.subtitle}>
-              Enter the six-digit verification code sent to:
+            <Text style={styles.expiredDescription}>
+              Your 24-hour email verification period has ended.
+              Please register again to create your ILAQA account.
             </Text>
 
-            <Text style={styles.email}>{email}</Text>
+            <TouchableOpacity style={styles.button} onPress={onRegisterAgain}>
+              <Text style={styles.buttonText}>REGISTER AGAIN →</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={onBackToLogin}>
+              <Text style={styles.backText}>← Back to Sign In</Text>
+            </TouchableOpacity>
           </View>
+        ) : (
+          <>
+            <View style={styles.heading}>
+              <Text style={styles.title}>VERIFY YOUR</Text>
+              <Text style={[styles.title, styles.accent]}>EMAIL.</Text>
 
-          <Text style={styles.label}>
-            VERIFICATION CODE
-          </Text>
-
-          <TextInput
-            style={styles.input}
-            placeholder="000000"
-            placeholderTextColor="#777"
-            keyboardType="number-pad"
-            maxLength={6}
-            autoCorrect={false}
-            value={code}
-            onChangeText={(value) => {
-              setCode(value.replace(/[^0-9]/g, ''));
-              setPopup(null);
-            }}
-            textContentType="oneTimeCode"
-          />
-
-          <Text style={styles.hint}>
-            Your code expires after 60 seconds.
-          </Text>
-
-
-          <TouchableOpacity
-            style={[
-              styles.button,
-              loading && styles.disabled,
-            ]}
-            onPress={handleVerify}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#101310" />
-            ) : (
-              <Text style={styles.buttonText}>
-                VERIFY EMAIL →
+              <Text style={styles.subtitle}>
+                Enter the six-digit verification code sent to:
               </Text>
-            )}
-          </TouchableOpacity>
 
-         
-<TouchableOpacity
-  style={[
-    styles.resendButton,
-    (loading || resending || resendCountdown > 0) &&
-      styles.disabled,
-  ]}
-  onPress={handleResend}
-  disabled={loading || resending || resendCountdown > 0}
->
-  <Text style={styles.resendText}>
-    {resending
-      ? 'SENDING...'
-      : resendCountdown > 0
-        ? `RESEND CODE IN ${resendCountdown}s`
-        : "DIDN'T RECEIVE THE CODE? RESEND"}
-  </Text>
-</TouchableOpacity>
+              <Text style={styles.email}>{email}</Text>
+            </View>
 
+            <Text style={styles.label}>VERIFICATION CODE</Text>
 
-          <TouchableOpacity onPress={onBackToLogin}>
-            <Text style={styles.backText}>
-              ← Back to Sign In
-            </Text>
-          </TouchableOpacity>
-        </>
-      )}
-    </ScrollView>
-    <AppPopup
-      visible={popup !== null}
-      type={popup?.type ?? 'error'}
-      title={popup?.title ?? ''}
-      message={popup?.message ?? ''}
-      onClose={() => setPopup(null)}
-    />
-  </SafeAreaView>
-);
+            <TextInput
+              style={styles.input}
+              placeholder="000000"
+              placeholderTextColor="#777"
+              keyboardType="number-pad"
+              maxLength={6}
+              autoCorrect={false}
+              value={code}
+              onChangeText={(value) => {
+                setCode(value);
+                closePopup();
+              }}
+              textContentType="oneTimeCode"
+            />
+
+            <Text style={styles.hint}>Your code expires after 60 seconds.</Text>
+
+            <TouchableOpacity
+              style={[styles.button, loading && styles.disabled]}
+              onPress={handleVerify}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color="#101310" />
+              ) : (
+                <Text style={styles.buttonText}>VERIFY EMAIL →</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.resendButton, resendDisabled && styles.disabled]}
+              onPress={handleResend}
+              disabled={resendDisabled}
+            >
+              <Text style={styles.resendText}>
+                {resending
+                  ? 'SENDING...'
+                  : resendCountdown > 0
+                    ? `RESEND CODE IN ${resendCountdown}s`
+                    : "DIDN'T RECEIVE THE CODE? RESEND"}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={onBackToLogin}>
+              <Text style={styles.backText}>← Back to Sign In</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </ScrollView>
+
+      <MessagePopup popup={popup} onClose={closePopup} />
+    </SafeAreaView>
+  );
 }
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0C0D0C',
-  },
-  content: {
-    flexGrow: 1,
-    paddingHorizontal: 28,
-    paddingTop: 55,
-    paddingBottom: 40,
-  },
-  logo: {
-    color: '#C6FF35',
-    fontSize: 25,
-    fontWeight: '900',
-    letterSpacing: 2,
-  },
+  ...signInStyles,
   heading: {
     marginTop: 65,
     marginBottom: 35,
@@ -344,9 +244,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: -1.5,
     lineHeight: 46,
-  },
-  accent: {
-    color: '#C6FF35',
   },
   subtitle: {
     color: '#999E99',
@@ -359,13 +256,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     marginTop: 8,
-  },
-  label: {
-    color: '#A5A9A5',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-    marginBottom: 9,
   },
   input: {
     backgroundColor: '#1C1E1C',
@@ -393,15 +283,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 30,
   },
-  disabled: {
-    opacity: 0.6,
-  },
-  buttonText: {
-    color: '#101310',
-    fontWeight: '900',
-    fontSize: 14,
-    letterSpacing: 1,
-  },
   resendButton: {
     marginTop: 30,
     alignItems: 'center',
@@ -418,31 +299,27 @@ const styles = StyleSheet.create({
     marginTop: 35,
     fontSize: 13,
   },
-
-
-  
-expiredContainer: {
-  flex: 1,
-  justifyContent: 'center',
-  paddingTop: 100,
-},
-expiredIcon: {
-  fontSize: 42,
-  marginBottom: 24,
-},
-expiredTitle: {
-  color: '#FFFFFF',
-  fontSize: 39,
-  fontWeight: '900',
-  letterSpacing: -1.5,
-  lineHeight: 46,
-},
-expiredDescription: {
-  color: '#999E99',
-  fontSize: 14,
-  lineHeight: 23,
-  marginTop: 22,
-  marginBottom: 18,
-},
-
+  expiredContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingTop: 100,
+  },
+  expiredIcon: {
+    fontSize: 42,
+    marginBottom: 24,
+  },
+  expiredTitle: {
+    color: '#FFFFFF',
+    fontSize: 39,
+    fontWeight: '900',
+    letterSpacing: -1.5,
+    lineHeight: 46,
+  },
+  expiredDescription: {
+    color: '#999E99',
+    fontSize: 14,
+    lineHeight: 23,
+    marginTop: 22,
+    marginBottom: 18,
+  },
 });

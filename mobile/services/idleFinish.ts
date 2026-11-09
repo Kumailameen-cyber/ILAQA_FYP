@@ -1,3 +1,6 @@
+// Forgotten-run handling on the phone: auto-finish an idle run, and stop a
+// run the server has already closed.
+
 import { idleFinishDue } from './idleRule';
 import {
   clearActiveRun,
@@ -8,7 +11,7 @@ import {
   setRunRecording,
 } from './runStorage';
 
-export type AutoFinishedRun = {
+type AutoFinishedRun = {
   runId: string;
   endedAt: number;
   activeSeconds: number;

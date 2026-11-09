@@ -1,86 +1,47 @@
-﻿
 using System.Security.Cryptography;
 using System.Text;
 
-namespace ILAQA.Services
+namespace ILAQA.Services;
+
+// Six-digit email codes. Only an HMAC of the code is stored, keyed with a
+// server secret (Otp:SecretKey) and bound to one account or email.
+public sealed class OtpService(IConfiguration configuration)
 {
-    public class OtpService
+    private readonly byte[] _secretKey = LoadSecretKey(configuration);
+
+    // A cryptographically secure code, 000000 to 999999.
+    public string GenerateOtp() => RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+
+    // ownerKey binds the code to one account (or email, or purpose).
+    public string HashOtp(string ownerKey, string otp) =>
+        Convert.ToHexString(HMACSHA256.HashData(_secretKey, Encoding.UTF8.GetBytes($"{ownerKey}:{otp}")));
+
+    // Constant-time compare, so timing does not leak the stored hash.
+    public bool VerifyOtp(string ownerKey, string submittedOtp, string storedHash)
     {
-        private readonly byte[] _secretKey;
+        if (submittedOtp.Length != 6 || !submittedOtp.All(char.IsAsciiDigit))
+            return false;
 
-        public OtpService(IConfiguration configuration)
+        byte[] expected;
+        try
         {
-            var secret = configuration["Otp:SecretKey"];
-
-            if (string.IsNullOrWhiteSpace(secret))
-            {
-                throw new InvalidOperationException(
-                    "OTP secret key is missing.");
-            }
-
-            _secretKey = Convert.FromBase64String(secret);
-
-            if (_secretKey.Length < 32)
-            {
-                throw new InvalidOperationException(
-                    "OTP secret key must be at least 32 bytes.");
-            }
+            expected = Convert.FromHexString(storedHash);
+        }
+        catch (FormatException)
+        {
+            return false;
         }
 
-        // Generate a cryptographically secure six-digit OTP.
-        public string GenerateOtp()
-        {
-            int number = RandomNumberGenerator.GetInt32(
-                0, 1_000_000);
+        return CryptographicOperations.FixedTimeEquals(expected, Convert.FromHexString(HashOtp(ownerKey, submittedOtp)));
+    }
 
-            return number.ToString("D6");
-        }
+    private static byte[] LoadSecretKey(IConfiguration configuration)
+    {
+        var secret = configuration["Otp:SecretKey"];
+        if (string.IsNullOrWhiteSpace(secret))
+            throw new InvalidOperationException("OTP secret key is missing.");
 
-        // Protect the OTP using a server-side secret.
-        // Including the user ID binds the code to one account.
-        public string HashOtp(string userId, string otp)
-        {
-            var message = Encoding.UTF8.GetBytes(
-                $"{userId}:{otp}");
-
-            var hash = HMACSHA256.HashData(
-                _secretKey, message);
-
-            return Convert.ToHexString(hash);
-        }
-
-        // Compare the submitted OTP securely.
-        public bool VerifyOtp(
-            string userId,
-            string submittedOtp,
-            string storedHash)
-        {
-            if (submittedOtp.Length != 6 ||
-                !submittedOtp.All(char.IsAsciiDigit))
-            {
-                return false;
-            }
-
-            var submittedHash = HashOtp(
-                userId, submittedOtp);
-
-            byte[] expectedBytes;
-
-            try
-            {
-                expectedBytes =
-                    Convert.FromHexString(storedHash);
-            }
-            catch (FormatException)
-            {
-                return false;
-            }
-
-            var actualBytes =
-                Convert.FromHexString(submittedHash);
-
-            return CryptographicOperations.FixedTimeEquals(
-                expectedBytes, actualBytes);
-        }
+        var key = Convert.FromBase64String(secret);
+        return key.Length >= 32 ? key : throw new InvalidOperationException("OTP secret key must be at least 32 bytes.");
     }
 }

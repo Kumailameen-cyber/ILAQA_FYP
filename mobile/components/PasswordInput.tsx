@@ -1,5 +1,6 @@
+// Password box with a SHOW / HIDE toggle, used by Login, Register and Delete Account.
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   View,
   Text,

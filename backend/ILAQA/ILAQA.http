@@ -1,6 +1,30 @@
-@ILAQA_HostAddress = http://localhost:5246
+@host = http://localhost:5246
+# Paste the accessToken from the Login answer here.
+@token = paste-access-token
 
-GET {{ILAQA_HostAddress}}/weatherforecast/
-Accept: application/json
+### Sign in
+POST {{host}}/api/auth/login
+Content-Type: application/json
 
-###
+{
+  "emailOrUsername": "runner1",
+  "password": "Password1"
+}
+
+### My profile
+GET {{host}}/api/runner/me
+Authorization: Bearer {{token}}
+
+### Start a run (use a new GUID each time)
+POST {{host}}/api/runs/start
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "runId": "3f2b8c1e-0000-4000-8000-000000000001",
+  "startedAt": "2026-11-09T10:00:00Z"
+}
+
+### Territory map
+GET {{host}}/api/runs/territories
+Authorization: Bearer {{token}}

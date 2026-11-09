@@ -1,5 +1,7 @@
+// Profile text that can be edited in place (display name or bio): shows the
+// value with a pencil button, or an input with SAVE / CANCEL.
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import {
   View,
   Text,

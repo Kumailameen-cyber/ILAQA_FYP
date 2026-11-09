@@ -1,94 +1,50 @@
-﻿
-using ILAQA.Models;
-using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-namespace ILAQA.Services
+using ILAQA.Models;
+using Microsoft.IdentityModel.Tokens;
+
+namespace ILAQA.Services;
+
+// Access tokens (JWT) and refresh tokens.
+public sealed class JwtService(IConfiguration configuration)
 {
-    public class JwtService
+    // A short-lived JWT tied to the user's current login session.
+    public string GenerateToken(ApplicationUser user)
     {
-        private readonly IConfiguration _configuration;
+        if (user.ActiveSessionId == null)
+            throw new InvalidOperationException("User does not have an active session.");
 
-        public JwtService(IConfiguration configuration)
-        {
-            _configuration = configuration;
-        }
+        var key = new SymmetricSecurityKey(Convert.FromBase64String(configuration["Jwt:Key"]!));
 
-        public string GenerateToken(ApplicationUser user)
-        {
-            var key = Convert.FromBase64String(
-                _configuration["Jwt:Key"]!);
+        Claim[] claims =
+        [
+            new(JwtRegisteredClaimNames.Sub, user.Id),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(ClaimTypes.NameIdentifier, user.Id),
+            new(ClaimTypes.Name, user.UserName!),
+            new("sessionId", user.ActiveSessionId.Value.ToString()) // Which login session owns this JWT.
+        ];
 
-            var securityKey = new SymmetricSecurityKey(key);
+        var token = new JwtSecurityToken(
+            issuer: configuration["Jwt:Issuer"],
+            audience: configuration["Jwt:Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddMinutes(int.Parse(configuration["Jwt:ExpiryMinutes"]!)),
+            signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
 
-            var credentials = new SigningCredentials(
-                securityKey,
-                SecurityAlgorithms.HmacSha256);
-
-
-            if (user.ActiveSessionId == null)
-            {
-                throw new InvalidOperationException(
-                    "User does not have an active session.");
-            }
-
-            var claims = new List<Claim>
-{
-    new Claim(JwtRegisteredClaimNames.Sub, user.Id),
-
-    new Claim(JwtRegisteredClaimNames.Jti,
-        Guid.NewGuid().ToString()),
-
-    new Claim(ClaimTypes.NameIdentifier, user.Id),
-
-    new Claim(ClaimTypes.Name, user.UserName!),
-
-    // Identify which login session owns this JWT
-    new Claim("sessionId", user.ActiveSessionId.Value.ToString())
-};
-
-
-            var expiryMinutes = int.Parse(
-                _configuration["Jwt:ExpiryMinutes"]!);
-
-            var token = new JwtSecurityToken(
-                issuer: _configuration["Jwt:Issuer"],
-                audience: _configuration["Jwt:Audience"],
-                claims: claims,
-                expires: DateTime.UtcNow.AddMinutes(expiryMinutes),
-                signingCredentials: credentials
-            );
-
-            return new JwtSecurityTokenHandler()
-                .WriteToken(token);
-        }
-
-
-        public string GenerateRefreshToken()
-        {
-            // Generate 64 cryptographically secure random bytes
-            byte[] randomBytes = RandomNumberGenerator.GetBytes(64);
-
-            // Convert to a URL-safe string
-            return Convert.ToBase64String(randomBytes)
-                .Replace("+", "-")
-                .Replace("/", "_")
-                .TrimEnd('=');
-        }
-
-        public string HashRefreshToken(string refreshToken)
-        {
-            // Convert the refresh token into bytes
-            byte[] tokenBytes = Encoding.UTF8.GetBytes(refreshToken);
-
-            // Generate a SHA-256 hash
-            byte[] hashBytes = SHA256.HashData(tokenBytes);
-
-            // Convert hash into a 64-character hexadecimal string
-            return Convert.ToHexString(hashBytes);
-        }
-
+        return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    // 64 random bytes as a URL-safe string.
+    public string GenerateRefreshToken() =>
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(64))
+            .Replace("+", "-")
+            .Replace("/", "_")
+            .TrimEnd('=');
+
+    // Only this SHA-256 hash is stored in the database.
+    public string HashRefreshToken(string refreshToken) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(refreshToken)));
 }

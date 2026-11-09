@@ -219,20 +219,6 @@ runMultipleTerritoryTest(
   1
 );
 
-const gpsJumpRoute: GpsCoordinate[] = [
-  { latitude: 24.8607, longitude: 67.0011 },
-  { latitude: 24.8607, longitude: 67.0021 },
-  { latitude: 24.8617, longitude: 67.0021 },
-  { latitude: 24.8617, longitude: 67.0011 },
-  { latitude: 24.8607, longitude: 67.0011 },
-];
-
-// runMultipleTerritoryTest(
-//   'GPS jump creates fake square',
-//   gpsJumpRoute,
-//   0
-// );
-
 const timestampedGpsJumpRoute = [
   {
     latitude: 24.8607,

@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+// Forgot password, step 1: enter the account email to receive a reset code.
+
+import { useState } from 'react';
 import {
-  View,
   Text,
   TextInput,
   TouchableOpacity,
@@ -10,9 +11,9 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
-import AppPopup from '../components/AppPopup';
-
-import { API_URL } from '../config/api';
+import { MessagePopup, usePopup } from '../components/AppPopup';
+import { passwordResetStyles } from '../components/authStyles';
+import { postJson, TOO_MANY_REQUESTS_MESSAGE } from '../services/api';
 
 type Props = {
   onOtpRequested: (email: string) => void;
@@ -25,14 +26,10 @@ export default function ForgotPasswordScreen({
 }: Props) {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
-  const [popup, setPopup] = useState<{
-    title: string;
-    message: string;
-  } | null>(null);
+  const { popup, showPopup, closePopup } = usePopup();
 
-  const showError = (message: string) => {
-    setPopup({ title: 'UNABLE TO SEND CODE', message });
-  };
+  const showError = (message: string) =>
+    showPopup('error', 'UNABLE TO SEND CODE', message);
 
   const handleSendOtp = async () => {
     if (loading) return;
@@ -50,21 +47,15 @@ export default function ForgotPasswordScreen({
     }
 
     setLoading(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email: normalizedEmail }),
+      const { response, data } = await postJson('/api/auth/forgot-password', {
+        email: normalizedEmail,
       });
 
-      const data = await response.json().catch(() => null);
-
       if (response.status === 429) {
-        showError('Too many requests. Please wait a minute before trying again.');
+        showError(TOO_MANY_REQUESTS_MESSAGE);
         return;
       }
 
@@ -135,55 +126,13 @@ export default function ForgotPasswordScreen({
         </TouchableOpacity>
       </ScrollView>
 
-      <AppPopup
-        visible={popup !== null}
-        type="error"
-        title={popup?.title ?? ''}
-        message={popup?.message ?? ''}
-        onClose={() => setPopup(null)}
-      />
+      <MessagePopup popup={popup} onClose={closePopup} />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0C0D0C',
-  },
-  content: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 28,
-    paddingVertical: 48,
-  },
-  brand: {
-    color: '#C6FF35',
-    fontSize: 24,
-    fontWeight: '900',
-    letterSpacing: 2,
-    marginBottom: 45,
-  },
-  heading: {
-    color: '#FFFFFF',
-    fontSize: 32,
-    fontWeight: '900',
-    letterSpacing: -1,
-    marginBottom: 14,
-  },
-  description: {
-    color: '#A0A0A0',
-    fontSize: 15,
-    lineHeight: 23,
-    marginBottom: 35,
-  },
-  label: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    marginBottom: 10,
-  },
+  ...passwordResetStyles,
   input: {
     backgroundColor: '#1B1D1B',
     borderColor: '#333633',
@@ -194,32 +143,5 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     marginBottom: 20,
-  },
-  button: {
-    backgroundColor: '#C6FF35',
-    paddingVertical: 18,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  buttonText: {
-    color: '#0C0D0C',
-    fontSize: 14,
-    fontWeight: '900',
-    letterSpacing: 1,
-  },
-  backButton: {
-    alignItems: 'center',
-    marginTop: 28,
-    padding: 10,
-  },
-  backText: {
-    color: '#C6FF35',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1,
   },
 });
