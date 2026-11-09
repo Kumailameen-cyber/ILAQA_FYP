@@ -12,6 +12,21 @@
 **/secrets.json
 **/appsettings.Development.json
 
+**/env.local
+*.local
+
+# Deployment output (dotnet publish)
+**/publish/
+**/publish-*/
+
+# Personal notes, viva guides and AI-assistant files (kept locally only)
+/docs/
+/Claude outputs/
+/.agents/
+/.claude/
+/skills-lock.json
+/.cmd env*
+
 # Frontend (for later)
 node_modules/
 .expo/
