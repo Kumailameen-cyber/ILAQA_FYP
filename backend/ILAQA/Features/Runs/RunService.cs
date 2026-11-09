@@ -190,7 +190,7 @@ public sealed class RunService(
         try
         {
             await claims.SnapPoorPointsAsync(runId); // Move poor GPS points onto the road once.
-            var (newTerritories, _) = await claims.SaveNewTerritoriesAsync(runId, userId, runIsFinishing: false);
+            var (newTerritories, _) = await claims.SaveNewTerritoriesAsync(runId, userId);
             return newTerritories.Count;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -399,17 +399,16 @@ public sealed class RunService(
 
     // ===================== Map and routes =====================
 
-    // Every active territory on the map, with owner colour and label.
-    // Other runners' new land appears only after their run ends, and
-    // private runners show as "Anonymous profile" (FR-21).
+    // Every Active or Vulnerable territory, for everyone, as soon as it is
+    // claimed (live claiming, decision 10 Nov), with owner colour and label.
+    // Private runners show as "Anonymous profile"; GPS points and routes are
+    // never sent to other runners (FR-21).
     public async Task<List<MapTerritoryDto>> GetMapTerritoriesAsync(string viewerUserId)
     {
         var rows = await (
                 from t in db.Territories.AsNoTracking()
                 where t.Status == "Active" || t.Status == "Vulnerable"
                 join u in db.Users on t.OwnerUserId equals u.Id
-                join r in db.Runs on t.RunId equals (Guid?)r.Id into runs
-                from r in runs.DefaultIfEmpty()
                 orderby t.CreatedAt descending
                 select new
                 {
@@ -418,15 +417,13 @@ public sealed class RunService(
                     Owner = new ApplicationUser
                     {
                         Id = u.Id, UserName = u.UserName, DisplayName = u.DisplayName, IsProfilePublic = u.IsProfilePublic
-                    },
-                    RunStatus = r == null ? null : r.Status
+                    }
                 })
             .ToListAsync();
 
         var now = DateTime.UtcNow;
 
         return rows
-            .Where(row => TerritoryDetectionService.IsVisibleOnMap(row.Owner.Id, row.RunStatus, viewerUserId))
             .Select(row => new MapTerritoryDto(
                 row.Territory.Id,
                 Math.Round(row.Territory.AreaSquareMeters, 2),

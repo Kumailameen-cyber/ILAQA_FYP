@@ -1287,13 +1287,14 @@ namespace ILAQA.Tests
             Assert.Empty(result.AwardedPieces);
         }
 
-        // ----- Live takeover guard (fix #1) -----
-        // Taking a rival's land during a run would change their territory on
-        // everyone's map and reveal the runner's route. Such a claim waits
-        // until Finish. A claim that takes no one's land still applies live.
+        // ----- Live claiming (decision 10 Nov) -----
+        // An upload and Finish use exactly the same claim rules, so a closed
+        // loop is claimed the moment it closes. These are the rules applied.
 
+        // A rival's vulnerable land under the loop is taken straight away:
+        // only the covered part; the rival keeps the rest.
         [Fact]
-        public void ClaimOverVulnerableLandDuringRun_ShouldBePostponed()
+        public void ClaimOverVulnerableLandDuringRun_ShouldBeTakenStraightAway()
         {
             var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
                 Now.AddDays(-1));
@@ -1301,36 +1302,26 @@ namespace ILAQA.Tests
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
 
-            Assert.True(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.Null(result.RejectionReason);
+            var takeover = Assert.Single(result.Takeovers);
+            Assert.InRange(AreaOf(takeover.TakenPart), 4_900, 5_100);
+            Assert.InRange(AreaOf(Assert.Single(takeover.RemainingPieces)), 4_900, 5_100);
         }
 
         [Fact]
-        public void ClaimOverVulnerableLandAtFinish_ShouldBeApplied()
-        {
-            var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
-                Now.AddDays(-1));
-
-            var result = Service().ResolveClaim(
-                Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
-
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: true));
-        }
-
-        [Fact]
-        public void ClaimOnFreeLandDuringRun_ShouldApplyLive()
+        public void ClaimOnFreeLandDuringRun_ShouldClaimTheWholeLoop()
         {
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory>(), Now);
 
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.Null(result.RejectionReason);
+            Assert.InRange(result.AwardedAreaSquareMeters, 9_900, 10_100);
+            Assert.Empty(result.Takeovers);
         }
 
-        // Shielded rival land is never taken, so the free part applies live.
+        // Shielded rival land is never taken: only the free part is claimed.
         [Fact]
-        public void ClaimOverShieldedLandDuringRun_ShouldApplyFreePartLive()
+        public void ClaimOverShieldedLandDuringRun_ShouldClaimOnlyTheFreePart()
         {
             var shielded = Owned(Rival, Rect(-50, 0, 50, 100), "Active",
                 Now.AddDays(2));
@@ -1338,8 +1329,8 @@ namespace ILAQA.Tests
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory> { shielded }, Now);
 
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.InRange(result.AwardedAreaSquareMeters, 4_900, 5_100);
+            Assert.Empty(result.Takeovers);
         }
 
         // ----- Shield and overlap helpers -----
@@ -2217,36 +2208,11 @@ namespace ILAQA.Tests
                 8000, 11500);
         }
 
-        // ----- Map visibility (privacy, FR-21) -----
-
-        [Fact]
-        public void OwnTerritoryDuringRun_ShouldBeVisibleToOwner()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Me, "Running", Me));
-        }
-
-        [Fact]
-        public void OtherRunnersTerritoryDuringTheirRun_ShouldBeHidden()
-        {
-            Assert.False(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, "Running", Me));
-        }
-
-        [Fact]
-        public void OtherRunnersTerritoryAfterTheirRun_ShouldBeVisible()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, "Completed", Me));
-        }
-
-        // Split leftovers have no run of their own.
-        [Fact]
-        public void TerritoryWithoutRun_ShouldBeVisible()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, null, Me));
-        }
+        // Map visibility (decision 10 Nov): every Active or Vulnerable
+        // territory is shown to everyone as soon as it is claimed, also
+        // during the owner's run. Privacy is the owner label (tests above:
+        // private owners show "Anonymous profile"); GPS and routes are never
+        // sent to other runners.
 
         // ----- Run validation status at Finish (UC-02, UC-06) -----
 

@@ -24,13 +24,13 @@ public sealed class TerritoryClaimService(ApplicationDbContext context, Territor
     // Every meaningful candidate becomes one TerritoryClaims row with a
     // status and reason; approved claims also create a Territory and a
     // "Claimed" TerritoryEvent in the same SaveChanges (UC-06, FR-17).
-    // During a run (runIsFinishing = false) a claim that would take
-    // another runner's land is postponed: nothing is saved for it, so
-    // Finish plans and applies it again.
+    // Live claiming (decision 10 Nov): every upload and Finish use exactly
+    // the same rules, including taking a rival's vulnerable land, so a loop
+    // is claimed the moment it closes. A loop already recorded (same claim
+    // key) is never claimed again by a retry or by Finish.
     public async Task<(List<Territory> NewTerritories, TerritoryAnalysis Analysis)>
         SaveNewTerritoriesAsync(
-            Guid runId, string userId, bool runIsFinishing,
-            DateTime? activityTime = null)
+            Guid runId, string userId, DateTime? activityTime = null)
     {
         var gpsPoints = await context.RunGpsPoints
             .AsNoTracking()
@@ -97,11 +97,6 @@ public sealed class TerritoryClaimService(ApplicationDbContext context, Territor
 
                 resolution = detector.ResolveClaim(
                     candidate.Boundary, userId, overlapping, now);
-
-                // Taking a rival's land waits until Finish (fix #1).
-                if (TerritoryDetectionService.ShouldPostponeClaim(
-                        resolution, runIsFinishing))
-                    continue;
             }
 
             var claim = new TerritoryClaim
@@ -336,7 +331,7 @@ public sealed class TerritoryClaimService(ApplicationDbContext context, Territor
         try
         {
             (_, analysis) = await SaveNewTerritoriesAsync(
-                runId, userId, runIsFinishing: true, activityTime);
+                runId, userId, activityTime);
 
             // A finished run with 200 m of genuine movement renews all
             // of this runner's shields (FR-18).

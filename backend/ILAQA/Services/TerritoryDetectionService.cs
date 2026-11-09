@@ -982,15 +982,6 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
             : renewed;
     }
 
-    // Taking another runner's land during a run would change their
-    // territory on everyone's map and reveal the route, so such a claim
-    // waits until Finish. A claim that takes no one's land applies live.
-    public static bool ShouldPostponeClaim(
-        ClaimResolution resolution, bool runIsFinishing)
-    {
-        return !runIsFinishing && resolution.Takeovers.Count > 0;
-    }
-
     // ----- Shield refresh, map colour and owner privacy -----
 
     // Genuine movement needed in one run to renew the owner's shields.
@@ -1039,17 +1030,6 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
     }
 
     public const string AnonymousOwnerLabel = "Anonymous profile";
-
-    // Runners always see their own land at once. Other runners' land
-    // appears only after the run that claimed it has finished, so no
-    // one can follow a runner live (FR-21). Split leftovers have no run.
-    public static bool IsVisibleOnMap(
-        string ownerUserId, string? runStatus, string viewerUserId)
-    {
-        return ownerUserId == viewerUserId ||
-            runStatus == null ||
-            runStatus == "Completed";
-    }
 
     // Range plus area rounded to whole m², stable across re-analysis.
     private static (int, int, double) ClaimKey(
