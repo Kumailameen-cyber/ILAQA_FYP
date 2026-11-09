@@ -1,5 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 import { API_URL } from '../config/api';
+import { fetchWithTimeout } from './http';
 import {
   cacheConfirmedTerritories,
   ConfirmedTerritory,
@@ -36,7 +37,7 @@ async function renewAccessToken(): Promise<string> {
     refreshInFlight = (async () => {
       const refreshToken = await SecureStore.getItemAsync('refreshToken');
       if (!refreshToken) throw new Error('Session expired. Please log in.');
-      const response = await fetch(`${API_URL}/api/auth/refresh`, {
+      const response = await fetchWithTimeout(`${API_URL}/api/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
@@ -63,7 +64,7 @@ async function postJson(path: string, body?: unknown): Promise<any> {
   if (!token) token = await renewAccessToken();
 
   const send = (authToken: string) =>
-    fetch(`${API_URL}${path}`, {
+    fetchWithTimeout(`${API_URL}${path}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${authToken}`,
@@ -259,7 +260,7 @@ export async function fetchSavedTerritories(): Promise<ConfirmedTerritory[]> {
   }
 
   const send = (authToken: string) =>
-    fetch(`${API_URL}/api/runs/territories`, {
+    fetchWithTimeout(`${API_URL}/api/runs/territories`, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${authToken}`,
@@ -287,50 +288,4 @@ export async function fetchSavedTerritories(): Promise<ConfirmedTerritory[]> {
   }
 
   return territories as ConfirmedTerritory[];
-}
-export type SavedRunRoute = {
-  runId: string;
-  startedAt: string;
-  legs: {
-    legNo: number;
-    coordinates: {
-      latitude: number;
-      longitude: number;
-    }[];
-  }[];
-};
-
-export async function fetchSavedRoutes(): Promise<SavedRunRoute[]> {
-  let token = await SecureStore.getItemAsync('accessToken');
-
-  if (!token) {
-    token = await renewAccessToken();
-  }
-
-  const send = (authToken: string) =>
-    fetch(`${API_URL}/api/runs/routes`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${authToken}`,
-      },
-    });
-
-  let response = await send(token);
-
-  if (response.status === 401) {
-    token = await renewAccessToken();
-    response = await send(token);
-  }
-
-  if (!response.ok) {
-    throw new Error(`Unable to fetch routes: HTTP ${response.status}`);
-  }
-
-  const routes = await response.json();
-
-  if (!Array.isArray(routes)) {
-    throw new Error('Invalid routes response');
-  }
-
-  return routes as SavedRunRoute[];
 }
