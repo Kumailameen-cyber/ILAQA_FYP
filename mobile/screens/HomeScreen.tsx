@@ -6,7 +6,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
-  Alert, Platform
+  Alert, Platform, AppState
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -33,7 +33,6 @@ import {
   markRunFinishRequested,
   getConfirmedTerritories,
   ConfirmedTerritory,
-  inspectSavedRuns,
   getActiveRunState,
   saveRunTiming,
   ActiveRunState,
@@ -43,8 +42,6 @@ import {
   syncRun,
   syncPendingRuns,
   fetchSavedTerritories,
-  fetchSavedRoutes,
-  SavedRunRoute,
 } from '../services/runSync';
 
 
@@ -136,8 +133,6 @@ export default function HomeScreen({
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
   
   
-  const [savedRoutes, setSavedRoutes] =
-    useState<SavedRunRoute[]>([]);
   const [savedTerritories, setSavedTerritories] =
     useState<ConfirmedTerritory[]>([]);
 
@@ -145,6 +140,9 @@ export default function HomeScreen({
  
 // Fetch all active territories from the backend.
 // Refresh every 15 seconds so other players' claims appear.
+// Lets other code (a finished sync, new land) refresh the map at once.
+const refreshTerritoriesRef = useRef<() => void>(() => {});
+
 useEffect(() => {
   let mounted = true;
   let fetching = false;
@@ -167,33 +165,29 @@ useEffect(() => {
     }
   };
 
+  refreshTerritoriesRef.current = () => {
+    void loadSavedTerritories();
+  };
   void loadSavedTerritories();
 
+  // Other runners' land: check every 10 s, and at once when the app comes
+  // back to the screen (timers do not run while it is in the background).
   const interval = setInterval(() => {
     void loadSavedTerritories();
-  }, 15000);
+  }, 10000);
+  const appState = AppState.addEventListener('change', (state) => {
+    if (state === 'active') void loadSavedTerritories();
+  });
 
   return () => {
     mounted = false;
     clearInterval(interval);
+    appState.remove();
+    refreshTerritoriesRef.current = () => {};
   };
 }, [runnerId]);
 
 
- // Load saved routes on startup and whenever a run finishes syncing.
-const loadRoutes = async () => {
-  try {
-    const routes = await fetchSavedRoutes();
-    setSavedRoutes(routes);
-    console.log('ILAQA SAVED ROUTES:', routes.length);
-  } catch (error) {
-    console.error('Unable to load saved routes:', error);
-  }
-};
-
-useEffect(() => {
-  void loadRoutes();
-}, [runnerId]);
 
     
 
@@ -289,17 +283,18 @@ useEffect(() => {
         const current = activeRunIdRef.current;
         let endedNow = 0;
 
+        let newLand = false;
         if (current) {
           const result = await syncRun(current);
           if (result.endedNow) endedNow++;
+          if (result.newlyClaimedCount > 0) newLand = true;
         }
 
         endedNow += await syncPendingRuns(runnerId);
 
-        // Saved routes change only when a run finished syncing; they are
-        // also loaded when the screen opens. (No more reload every 5 s.)
-        if (mounted && endedNow > 0) {
-          await loadRoutes();
+        // Show new or changed land at once instead of at the next check.
+        if (mounted && (newLand || endedNow > 0)) {
+          refreshTerritoriesRef.current();
         }
         
         if (mounted) {
@@ -834,8 +829,9 @@ await resumeRunRecording(runId);
             if (runId) {
   void syncRun(runId)
     .then(async () => {
-      // Fetch the finished route from the backend.
-      await loadRoutes();
+      // Show the final territories (takeovers and merges are applied at
+      // Finish).
+      refreshTerritoriesRef.current();
 
       setSyncMessage('');
     })
@@ -855,23 +851,6 @@ await resumeRunRecording(runId);
       },
     ]);
   };
-const inspectOldGps = async () => {
-  try {
-    const runs = await inspectSavedRuns();
-    console.log('ILAQA OLD GPS RUNS:', JSON.stringify(runs));
-    Alert.alert(
-      'Saved GPS Runs',
-      runs.length
-        ? runs.map(r =>
-            `${r.runId.slice(0, 8)}: ${r.pointCount} points, sync=${r.hasSyncRecord}`
-          ).join('\n')
-        : 'No GPS points stored'
-    );
-  } catch (error) {
-    Alert.alert('Inspection Error', String(error));
-  }
-};
-
   const recenterMap = () => {
     if (location) {
       centerMap(location.latitude, location.longitude);
@@ -985,7 +964,9 @@ const inspectOldGps = async () => {
   const color = territory.colorHex ?? '#C6FF35';
   return (
     <Polygon
-      key={`saved-${territory.territoryId}`}
+      // The key changes with the shape, so a merged or reduced territory
+      // is redrawn (Android maps do not always redraw changed points).
+      key={`saved-${territory.territoryId}-${territory.boundary.length}-${territory.areaSquareMeters}`}
       coordinates={territory.boundary}
       fillColor={withAlpha(color, 0.35)}
       strokeColor={color}
@@ -1004,34 +985,10 @@ const inspectOldGps = async () => {
 })}
 
 
-          {/* Historical GPS routes from Supabase; one polyline per leg. */}
-          {savedRoutes.map((run) =>
-            run.legs.map((leg) =>
-              leg.coordinates.length >= 2 ? (
-                <Polyline
-                  key={`saved-route-${run.runId}-${leg.legNo}`}
-                  coordinates={leg.coordinates}
-                  strokeColor="#38BDF8"
-                  strokeWidth={3}
-                />
-              ) : null
-            )
-          )}
+          {/* Past routes are not drawn: the map shows the current run's
+              line while tracking, and territories (Muneeb, 9 Nov). */}
 
         </MapView>
-<TouchableOpacity
-  onPress={inspectOldGps}
-  style={{
-    position: 'absolute',
-    top: 16,
-    right: 16,
-    backgroundColor: '#0C0D0C',
-    padding: 12,
-    borderRadius: 10,
-  }}
->
-  <Text style={{ color: '#C6FF35' }}>CHECK OLD GPS</Text>
-</TouchableOpacity>
         <TouchableOpacity
           style={styles.recenterButton}
           onPress={recenterMap}

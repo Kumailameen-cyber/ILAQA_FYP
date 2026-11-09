@@ -469,27 +469,3 @@ export async function getConfirmedTerritories(
     }
   });
 }
-
-export async function inspectSavedRuns() {
-  await initializeRunStorage();
-  const db = await getDatabase();
-
-  return db.getAllAsync<{
-    runId: string;
-    pointCount: number;
-    firstTimestamp: number;
-    lastTimestamp: number;
-    hasSyncRecord: number;
-  }>(`
-    SELECT
-      p.run_id AS runId,
-      COUNT(*) AS pointCount,
-      MIN(p.timestamp) AS firstTimestamp,
-      MAX(p.timestamp) AS lastTimestamp,
-      CASE WHEN s.run_id IS NULL THEN 0 ELSE 1 END AS hasSyncRecord
-    FROM gps_points p
-    LEFT JOIN run_sync s ON s.run_id = p.run_id
-    GROUP BY p.run_id
-    ORDER BY lastTimestamp DESC
-  `);
-}
