@@ -358,33 +358,10 @@ namespace ILAQA.Controllers
                     run.StartedAt, now, run.ActiveSeconds + addedSeconds,
                     request?.EndedAt, request?.ActiveSeconds, legFixes);
 
-                // Territory work may fail on unusual GPS; the run must still
-                // finish and keep its workout (FR-17). A failure is recorded
-                // as Failed and retried later. Shields count from the run's
-                // real end.
-                var processing = await _territoryClaimService.ProcessFinishedRunAsync(
-                    transaction, runId, userId, timing.EndedAt, now);
-
-                if (!processing.Succeeded)
-                    run = await _context.Runs.SingleAsync(r => r.Id == runId);
-
-                // Mark the run as completed.
-                run.ActiveSeconds = timing.ActiveSeconds;
-                run.EndedAt = timing.EndedAt;
-                run.ActiveStartedAt = null;
-                run.Status = "Completed";
-                run.ValidationStatus =
-                    TerritoryDetectionService.DecideValidationStatus(
-                        processing.Succeeded, processing.ApprovedClaimCount);
-
-                // Official distance: cleaned walking/running distance (no
-                // GPS teleports or bad fixes); 0 for vehicle-speed runs.
-                if (processing.Analysis != null)
-                    run.TotalDistanceMeters =
-                        processing.Analysis.GenuineDistanceMeters;
-
-                // Save the run and claimed territories together.
-                await _context.SaveChangesAsync();
+                // Territory work, then mark the run completed; the run and
+                // its claimed territories are saved together.
+                run = await _territoryClaimService.CompleteRunAsync(
+                    transaction, run, timing, now);
             }
 
             // Get the territories already stored for this run.
@@ -536,6 +513,8 @@ namespace ILAQA.Controllers
             if (run.Status != "Running" &&
                 run.Status != "Paused")
             {
+                // The phone recognises this exact answer as "run already
+                // finished" (mobile/services/runSync.ts): keep the wording.
                 return Conflict(
                     "GPS points cannot be uploaded to this run.");
             }

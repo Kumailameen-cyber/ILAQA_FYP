@@ -6,8 +6,15 @@ import {
   saveGpsPoint,
 } from './runStorage';
 import { syncRun } from './runSync';
+import { finishIdleRunIfDue, stopRunClosedByServer } from './idleFinish';
 
 export const BACKGROUND_LOCATION_TASK = 'ILAQA_BACKGROUND_LOCATION';
+
+const stopBackgroundUpdates = async () => {
+  if (await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK)) {
+    await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  }
+};
 
 TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
   if (error) {
@@ -47,8 +54,19 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     // Best-effort background upload, at most every 5 s (this task fires on
     // every GPS fix). Android can delay/suspend tasks; the HomeScreen timer
     // retries and SQLite retains unsent points.
+    // Finish a forgotten run: no 20 m of movement for 5 minutes (L3).
+    // The screen notices the run is gone and shows that it finished.
     try {
-      await syncRun(runId, { minIntervalMs: 5000 });
+      await finishIdleRunIfDue(stopBackgroundUpdates);
+    } catch (idleError) {
+      console.log('ILAQA idle check failed:', String(idleError));
+    }
+    try {
+      const result = await syncRun(runId, { minIntervalMs: 5000 });
+      // The server had already closed this run: stop recording into it.
+      if (result.serverEnded) {
+        await stopRunClosedByServer(runId, stopBackgroundUpdates);
+      }
     } catch (syncError) {
       console.log('ILAQA background sync queued:', String(syncError));
     }

@@ -2071,6 +2071,71 @@ namespace ILAQA.Tests
                 RunEnd.AddHours(1), retryWindowDays: 3));
         }
 
+        // ----- Abandoned runs (L3): no GPS for 6 hours -----
+
+        private static readonly DateTime AbandonStart =
+            new(2026, 11, 6, 8, 0, 0, DateTimeKind.Utc);
+
+        [Fact]
+        public void RunWithNoGpsForSixHours_IsAbandoned()
+        {
+            var lastFix = AbandonStart.AddMinutes(40);
+            Assert.True(TerritoryDetectionService.IsRunAbandoned(
+                "Running", AbandonStart, lastFix, lastFix.AddHours(6),
+                TimeSpan.FromHours(6)));
+            Assert.True(TerritoryDetectionService.IsRunAbandoned(
+                "Paused", AbandonStart, lastFix, lastFix.AddHours(7),
+                TimeSpan.FromHours(6)));
+        }
+
+        [Fact]
+        public void RunWithRecentGps_IsNotAbandoned()
+        {
+            var lastFix = AbandonStart.AddMinutes(40);
+            Assert.False(TerritoryDetectionService.IsRunAbandoned(
+                "Running", AbandonStart, lastFix, lastFix.AddHours(5.9),
+                TimeSpan.FromHours(6)));
+        }
+
+        [Fact]
+        public void RunWithoutAnyGps_CountsFromItsStart()
+        {
+            Assert.False(TerritoryDetectionService.IsRunAbandoned(
+                "Running", AbandonStart, null, AbandonStart.AddHours(5),
+                TimeSpan.FromHours(6)));
+            Assert.True(TerritoryDetectionService.IsRunAbandoned(
+                "Running", AbandonStart, null, AbandonStart.AddHours(6),
+                TimeSpan.FromHours(6)));
+        }
+
+        [Fact]
+        public void FinishedRun_IsNeverAbandoned()
+        {
+            Assert.False(TerritoryDetectionService.IsRunAbandoned(
+                "Completed", AbandonStart, AbandonStart, AbandonStart.AddDays(2),
+                TimeSpan.FromHours(6)));
+        }
+
+        // The abandoned run's running time stops at its last GPS fix, not
+        // at the moment the server notices it six hours later.
+        [Fact]
+        public void AbandonedRunningRun_CountsTimeUntilLastFixOnly()
+        {
+            var resumed = AbandonStart.AddMinutes(10);
+            Assert.Equal(600 + 1800, TerritoryDetectionService.ActiveSecondsAt(
+                "Running", 600, resumed, resumed.AddMinutes(30)));
+        }
+
+        [Fact]
+        public void AbandonedPausedRun_KeepsItsSavedTime()
+        {
+            Assert.Equal(900, TerritoryDetectionService.ActiveSecondsAt(
+                "Paused", 900, null, AbandonStart.AddHours(1)));
+            // Resumed after the last fix: nothing was recorded after that.
+            Assert.Equal(900, TerritoryDetectionService.ActiveSecondsAt(
+                "Running", 900, AbandonStart.AddHours(2), AbandonStart.AddHours(1)));
+        }
+
         // A retry renews shields from the run's own end, not from the
         // moment the retry happens.
         [Fact]
