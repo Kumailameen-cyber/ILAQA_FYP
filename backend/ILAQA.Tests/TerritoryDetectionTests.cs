@@ -1622,6 +1622,111 @@ namespace ILAQA.Tests
             Assert.Empty(Service().FindTerritories(points));
         }
 
+        // ----- Loop closure and lassos (decision 2, 10 Nov) -----
+
+        // Lasso: walk 150 m up a street, circle a 100 m x 100 m block, walk
+        // back down the same street. Only the block is land (10,000 m²);
+        // the street walked twice (the "tail") adds no area.
+        [Fact]
+        public void Lasso_ShouldClaimOnlyTheCircledBlock()
+        {
+            var points = new Route()
+                .To(0, 150, WalkSpeed)      // tail, going out
+                .To(100, 150, WalkSpeed)    // around the block
+                .To(100, 250, WalkSpeed)
+                .To(0, 250, WalkSpeed)
+                .To(0, 150, WalkSpeed)      // back at the crossing
+                .To(0, 0, WalkSpeed)        // tail, coming back
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+        }
+
+        // Lasso that does not come back: the block still counts on its own,
+        // because the route closes it where it crosses itself.
+        [Fact]
+        public void LassoWithoutWalkingBack_ShouldStillClaimTheBlock()
+        {
+            var points = new Route()
+                .To(0, 150, WalkSpeed)
+                .To(100, 150, WalkSpeed)
+                .To(100, 250, WalkSpeed)
+                .To(0, 250, WalkSpeed)
+                .To(0, 140, WalkSpeed)      // crosses its own path at (0,150)
+                .Build();
+
+            var block = Assert.Single(Service().AnalyzeRun(points).Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+        }
+
+        // Walking 300 m out and back on the same street encloses nothing.
+        [Fact]
+        public void LongOutAndBack_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(300, 0, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            Assert.Empty(Service().AnalyzeRun(points).Accepted);
+        }
+
+        // Out and back on the other side of the road (3 m apart): the thin
+        // strip between the two lines is rejected as too narrow, not land.
+        [Fact]
+        public void OutAndBackOnOtherSideOfRoad_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(300, 0, WalkSpeed)
+                .To(300, 3, WalkSpeed)
+                .To(0, 3, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Contains(analysis.Rejected, c =>
+                c.RejectionReason == TerritoryRejectionReasons.TooNarrow);
+        }
+
+        // Three sides of a block, ending 25 m from the start with no
+        // crossing: more than the 20 m closure limit, so no land, and the
+        // missing 25 m is never filled in.
+        [Fact]
+        public void EndingMoreThan20mFromStart_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 25, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Empty(analysis.Rejected); // no area was even formed
+        }
+
+        // Guard for the test above: ending 15 m from the start (inside the
+        // 20 m limit) closes the block.
+        [Fact]
+        public void EndingWithin20mOfStart_ShouldClaimTheBlock()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 15, WalkSpeed)
+                .Build();
+
+            Assert.Single(Service().AnalyzeRun(points).Accepted);
+        }
+
         // Standing still for 10 minutes: no fixes arrive (5 m distance
         // filter) and the next fix wobbles a few metres. Still one loop.
         [Fact]
