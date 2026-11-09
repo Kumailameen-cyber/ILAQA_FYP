@@ -1319,6 +1319,78 @@ namespace ILAQA.Tests
             Assert.Empty(result.Takeovers);
         }
 
+        // A phone retries the same upload (bad signal): the loop it already
+        // claimed has the same claim key, so nothing new is planned.
+        [Fact]
+        public void SameUploadTwice_ShouldClaimNothingNew()
+        {
+            var service = Service();
+            var points = new Route()
+                .To(100, 0, WalkSpeed).To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed).To(0, 0, WalkSpeed)
+                .Build();
+
+            var first = service.PlanNewClaims(service.AnalyzeRun(points), NothingSubmitted);
+            var claimed = Assert.Single(first);
+
+            var retry = service.PlanNewClaims(service.AnalyzeRun(points), new[]
+            {
+                (claimed.Candidate.StartSequenceNo, claimed.Candidate.EndSequenceNo,
+                 claimed.Candidate.AreaSquareMeters)
+            });
+
+            Assert.Empty(retry);
+        }
+
+        // Block A was claimed live on an upload; the runner then closes block
+        // B and presses Finish. Finish plans only block B, never A again.
+        [Fact]
+        public void FinishAfterLiveClaim_ShouldClaimOnlyTheNewLoop()
+        {
+            var service = Service();
+            var route = new Route()
+                .To(100, 0, WalkSpeed).To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed).To(0, 0, WalkSpeed);       // block A
+            var liveUpload = route.Build().ToList();
+
+            var liveClaim = Assert.Single(
+                service.PlanNewClaims(service.AnalyzeRun(liveUpload), NothingSubmitted));
+
+            var wholeRun = route
+                .To(0, -150, WalkSpeed)                           // walk on to block B
+                .To(100, -150, WalkSpeed).To(100, -250, WalkSpeed)
+                .To(0, -250, WalkSpeed).To(0, -150, WalkSpeed)
+                .Build();
+
+            var atFinish = service.PlanNewClaims(service.AnalyzeRun(wholeRun), new[]
+            {
+                (liveClaim.Candidate.StartSequenceNo, liveClaim.Candidate.EndSequenceNo,
+                 liveClaim.Candidate.AreaSquareMeters)
+            });
+
+            var blockB = Assert.Single(atFinish);
+            Assert.Equal(TerritoryClaimStatuses.Approved, blockB.Status);
+            Assert.True(blockB.Candidate.StartSequenceNo > liveClaim.Candidate.EndSequenceNo);
+        }
+
+        // Two runners close a loop round the same free block at the same
+        // moment. The claim lock makes them go one at a time; the first one
+        // commits new land with a fresh 3-day shield, so the second finds it
+        // shielded and gets nothing (BR-04: first valid committed claim wins).
+        [Fact]
+        public void SecondRunnerRacingForTheSameBlock_ShouldGetNothing()
+        {
+            var firstWinner = Owned(Rival, Rect(0, 0, 100, 100), "Active",
+                Now.AddDays(TerritoryDetectionService.ShieldDays));
+
+            var second = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { firstWinner }, Now);
+
+            Assert.Equal(TerritoryRejectionReasons.Shielded, second.RejectionReason);
+            Assert.Empty(second.AwardedPieces);
+            Assert.Empty(second.Takeovers);
+        }
+
         // Shielded rival land is never taken: only the free part is claimed.
         [Fact]
         public void ClaimOverShieldedLandDuringRun_ShouldClaimOnlyTheFreePart()
