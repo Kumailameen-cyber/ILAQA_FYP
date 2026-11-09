@@ -1429,12 +1429,28 @@ namespace ILAQA.Tests
         }
 
         [Fact]
-        public void BikeRun_ShouldNotRefreshShield()
+        public void BikeRun_ShouldCountOnlyTheWalkedParts()
+        {
+            // Walk 120 m, bike 240 m, walk 120 m (decision 11 Nov): only the
+            // 240 m walked counts; the bike part earns nothing.
+            var analysis = Service().AnalyzeRun(BikeLoop());
+
+            Assert.InRange(analysis.GenuineDistanceMeters, 235, 245);
+        }
+
+        [Fact]
+        public void BikeRideOnly_ShouldEarnNoDistanceOrShield()
         {
             var service = Service();
-            var analysis = service.AnalyzeRun(BikeLoop());
+            var analysis = service.AnalyzeRun(new Route()
+                .To(200, 0, BikeSpeed)
+                .To(200, 200, BikeSpeed)
+                .To(0, 200, BikeSpeed)
+                .To(0, 0, BikeSpeed)
+                .Build());
 
             Assert.Equal(0, analysis.GenuineDistanceMeters);
+            Assert.Empty(analysis.Accepted);
             Assert.False(service.ShouldRefreshShield(analysis));
         }
 
@@ -1710,6 +1726,132 @@ namespace ILAQA.Tests
 
             Assert.Empty(analysis.Accepted);
             Assert.Empty(analysis.Rejected); // no area was even formed
+        }
+
+        // ----- Forgotten Finish, then a vehicle ride (decision 5 report) -----
+
+        // Decision 11 Nov: a vehicle ride only cancels the part of the run
+        // DURING the ride. A runner walks a 100 m block (400 m), forgets to
+        // press Finish and rides a rickshaw home at 7 m/s (25 km/h) for
+        // 600 m. The block walked before the ride is kept, and only the
+        // 400 m walk counts as distance.
+        [Fact]
+        public void ForgottenFinishThenRickshawRide_KeepsTheBlockWalkedBefore()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .To(0, -600, 7.0)           // rickshaw ride, no Finish pressed
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.True(analysis.VehicleSuspected);
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+            Assert.InRange(analysis.GenuineDistanceMeters, 390, 410);
+            Assert.True(Service().ShouldRefreshShield(analysis));
+        }
+
+        // Pressed Start, then rode a rickshaw 600 m, got off and ran a
+        // block straight away. The block counts; only the run counts as
+        // distance, not the ride.
+        [Fact]
+        public void RickshawRideThenRun_ShouldClaimTheBlockAfterDropOff()
+        {
+            var points = new Route()
+                .To(0, 600, 7.0)            // rickshaw
+                .To(100, 600, WalkSpeed)    // gets off and runs a block
+                .To(100, 700, WalkSpeed)
+                .To(0, 700, WalkSpeed)
+                .To(0, 600, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+            Assert.InRange(analysis.GenuineDistanceMeters, 390, 410);
+        }
+
+        // Walk block A, ride 600 m, run block B: both blocks count, and the
+        // distance is the two walks (800 m) without the ride.
+        [Fact]
+        public void BlockThenRideThenBlock_ShouldClaimBothBlocks()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)      // block A
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .To(0, -600, 7.0)           // ride
+                .To(100, -600, WalkSpeed)   // block B
+                .To(100, -700, WalkSpeed)
+                .To(0, -700, WalkSpeed)
+                .To(0, -600, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Equal(2, analysis.Accepted.Count);
+            Assert.InRange(analysis.GenuineDistanceMeters, 790, 810);
+        }
+
+        // Walking before and after a ride must never be joined into a loop.
+        // (1) The ride itself forms one side of the "block".
+        [Fact]
+        public void RideAsOneSideOfABlock_ShouldNotCloseALoop()
+        {
+            var points = new Route()
+                .To(200, 0, WalkSpeed)
+                .To(200, 200, WalkSpeed)
+                .To(0, 200, 7.0)            // rickshaw along the top side
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Contains(analysis.Rejected, c =>
+                c.RejectionReason == TerritoryRejectionReasons.VehicleSpeed);
+        }
+
+        // (2) Two sides walked, a ride away and back to the same corner,
+        // then the last two sides walked. The block's sides were all walked,
+        // but they are joined only through the ride, so it is not land.
+        [Fact]
+        public void WalkedSidesBeforeAndAfterARide_ShouldNotJoinIntoALoop()
+        {
+            var points = new Route()
+                .To(200, 0, WalkSpeed)
+                .To(200, 200, WalkSpeed)
+                .To(800, 200, 7.0)          // ride away...
+                .To(200, 200, 7.0)          // ...and back to the same corner
+                .To(0, 200, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.True(analysis.VehicleSuspected);
+            Assert.Empty(analysis.Accepted);
+        }
+
+        // Riding never counts towards the 200 m shield renewal: 150 m of
+        // walking plus a 2 km ride is still only 150 m.
+        [Fact]
+        public void ShortWalkPlusLongRide_ShouldNotRenewShields()
+        {
+            var service = Service();
+            var analysis = service.AnalyzeRun(new Route()
+                .To(150, 0, WalkSpeed)
+                .To(150, 2_000, 7.0)
+                .Build());
+
+            Assert.InRange(analysis.GenuineDistanceMeters, 145, 155);
+            Assert.False(service.ShouldRefreshShield(analysis));
         }
 
         // Guard for the test above: ending 15 m from the start (inside the

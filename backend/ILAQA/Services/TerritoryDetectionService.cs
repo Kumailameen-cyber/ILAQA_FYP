@@ -227,25 +227,32 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
             points.OrderBy(p => p.SequenceNo).ToList());
         var sections = BuildSections(ordered);
 
-        analysis.VehicleSpeedSeconds =
-            sections.Sum(s => MeasureVehicleSpeedSeconds(s));
+        // Where in each section the runner was in a vehicle.
+        var rides = sections.Select(FindVehicleStretches).ToList();
+
+        analysis.VehicleSpeedSeconds = rides.Sum(r => r.Sum(stretch => stretch.Seconds));
         analysis.VehicleSuspected =
             analysis.VehicleSpeedSeconds > MaxVehicleSecondsPerRun;
 
-        // Vehicle runs earn no genuine distance.
-        analysis.GenuineDistanceMeters = analysis.VehicleSuspected
-            ? 0
-            : sections.Sum(s => SectionDistanceMeters(s));
+        // A ride only cancels the part of the run DURING the ride: walking
+        // and running before and after it still count (decision 11 Nov).
+        // Short bursts (15 s or less in total) are not a ride at all.
+        analysis.GenuineDistanceMeters = sections
+            .Select((section, i) => analysis.VehicleSuspected
+                ? DistanceOutsideRides(section, rides[i])
+                : SectionDistanceMeters(section))
+            .Sum();
 
-        foreach (var section in sections)
+        for (int i = 0; i < sections.Count; i++)
         {
-            foreach (var candidate in FindEnclosedAreas(section))
+            foreach (var candidate in FindEnclosedAreas(sections[i]))
             {
                 if (candidate.RejectionReason != null)
                 {
                     analysis.Rejected.Add(candidate);
                 }
-                else if (analysis.VehicleSuspected)
+                else if (analysis.VehicleSuspected &&
+                         rides[i].Any(ride => LoopUsesRide(candidate, ride)))
                 {
                     analysis.Rejected.Add(new TerritoryCandidate
                     {
@@ -366,11 +373,38 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
         return meters;
     }
 
-    // Seconds of one section spent at sustained vehicle speed.
-    private double MeasureVehicleSpeedSeconds(List<RunGpsPoint> section)
+    // One stretch of a section travelled at sustained vehicle speed, from
+    // the point where it began (FromIndex) to the last fast point (ToIndex).
+    private sealed record VehicleStretch(int FromIndex, int ToIndex, int FromSequenceNo, int ToSequenceNo, double Seconds);
+
+    // The stretches of one section spent at sustained vehicle speed
+    // (each at least 3 s long; the rule itself is unchanged).
+    private List<VehicleStretch> FindVehicleStretches(List<RunGpsPoint> section)
     {
-        double vehicleSeconds = 0;
+        var stretches = new List<VehicleStretch>();
         double stretchSeconds = 0;
+        int stretchStart = 0;
+
+        // The 10 s average decides WHETHER there was a ride (unchanged rule).
+        // Each step's own speed then decides exactly WHERE it began and
+        // ended, because the average reacts about 10 s late at both ends.
+        void CloseStretch(int lastIndex)
+        {
+            if (stretchSeconds >= MinVehicleStretchSeconds)
+            {
+                int first = stretchStart;
+                while (first > 0 && StepSpeed(section, first) > VehicleSpeedMetersPerSecond)
+                    first--;
+
+                int last = lastIndex;
+                while (last > first + 1 && StepSpeed(section, last) <= VehicleSpeedMetersPerSecond)
+                    last--;
+
+                stretches.Add(new VehicleStretch(first, last,
+                    section[first].SequenceNo, section[last].SequenceNo, stretchSeconds));
+            }
+            stretchSeconds = 0;
+        }
 
         for (int i = 1; i < section.Count; i++)
         {
@@ -399,21 +433,52 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
             if (windowSeconds > 0 &&
                 windowMeters / windowSeconds > VehicleSpeedMetersPerSecond)
             {
+                if (stretchSeconds == 0)
+                    stretchStart = i - 1;
                 stretchSeconds += segmentSeconds;
             }
-            else
+            else if (stretchSeconds > 0)
             {
-                if (stretchSeconds >= MinVehicleStretchSeconds)
-                    vehicleSeconds += stretchSeconds;
-
-                stretchSeconds = 0;
+                CloseStretch(i - 1);
             }
         }
 
-        if (stretchSeconds >= MinVehicleStretchSeconds)
-            vehicleSeconds += stretchSeconds;
+        if (stretchSeconds > 0)
+            CloseStretch(section.Count - 1);
 
-        return vehicleSeconds;
+        return stretches;
+    }
+
+    // Speed of the single step that ends at point i, in m/s.
+    private double StepSpeed(List<RunGpsPoint> section, int i)
+    {
+        double seconds = (section[i].RecordedAt - section[i - 1].RecordedAt).TotalSeconds;
+        double meters = gpsDistanceService.CalculateDistance(
+            section[i - 1].Latitude, section[i - 1].Longitude,
+            section[i].Latitude, section[i].Longitude);
+        return seconds > 0 ? meters / seconds : 0;
+    }
+
+    // A loop is cancelled by a ride only if it travels along part of it
+    // (sharing just the point where the ride began or ended is fine).
+    private static bool LoopUsesRide(TerritoryCandidate loop, VehicleStretch ride) =>
+        loop.StartSequenceNo < ride.ToSequenceNo && loop.EndSequenceNo > ride.FromSequenceNo;
+
+    // Distance of a section without the parts travelled in a vehicle.
+    private double DistanceOutsideRides(List<RunGpsPoint> section, List<VehicleStretch> rides)
+    {
+        double meters = 0;
+
+        for (int i = 1; i < section.Count; i++)
+        {
+            bool inRide = rides.Any(ride => i > ride.FromIndex && i <= ride.ToIndex);
+            if (!inRide)
+                meters += gpsDistanceService.CalculateDistance(
+                    section[i - 1].Latitude, section[i - 1].Longitude,
+                    section[i].Latitude, section[i].Longitude);
+        }
+
+        return meters;
     }
 
     // Find every genuinely enclosed area in one continuous section,
@@ -932,11 +997,11 @@ public sealed class TerritoryDetectionService(GpsDistanceService gpsDistanceServ
     public const double ShieldRefreshDistanceMeters = 200;
 
     // A finished run with enough genuine walking/running (on claimed or
-    // unclaimed ground) renews all of the runner's shields.
+    // unclaimed ground) renews all of the runner's shields. Vehicle rides
+    // are already left out of GenuineDistanceMeters.
     public bool ShouldRefreshShield(TerritoryAnalysis analysis)
     {
-        return !analysis.VehicleSuspected &&
-            analysis.GenuineDistanceMeters >= ShieldRefreshDistanceMeters;
+        return analysis.GenuineDistanceMeters >= ShieldRefreshDistanceMeters;
     }
 
     // A fixed map colour for each runner, derived from their user id.
