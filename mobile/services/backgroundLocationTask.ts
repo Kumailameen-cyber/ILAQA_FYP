@@ -9,7 +9,7 @@ import {
   saveGpsPoint,
 } from './runStorage';
 import { syncRun } from './runSync';
-import { finishIdleRunIfDue, stopRunClosedByServer } from './idleFinish';
+import { stopRunClosedByServer } from './idleFinish';
 
 const BACKGROUND_LOCATION_TASK = 'ILAQA_BACKGROUND_LOCATION';
 
@@ -87,13 +87,8 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
         continue;
       await saveGpsPoint(runId, latitude, longitude, accuracy, item.timestamp);
     }
-    // Finish a forgotten run: no 20 m of movement for 5 minutes (L3).
-    // The screen notices the run is gone and shows that it finished.
-    try {
-      await finishIdleRunIfDue(stopBackgroundTracking);
-    } catch (idleError) {
-      console.log('ILAQA idle check failed:', String(idleError));
-    }
+    // Resting never finishes a run on the phone; the server's abandoned-run
+    // safety net handles a run that was truly forgotten.
     // Best-effort background upload, at most every 5 s (this task fires on
     // every GPS fix). Android can delay/suspend tasks; the Home screen timer
     // retries and SQLite retains unsent points.

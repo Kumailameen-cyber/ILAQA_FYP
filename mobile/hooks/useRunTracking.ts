@@ -29,17 +29,12 @@ import {
   getRunSyncRecord,
   getActiveRunId,
 } from '../services/runStorage';
-import {
-  finishIdleRunIfDue,
-  stopRunClosedByServer,
-} from '../services/idleFinish';
+import { stopRunClosedByServer } from '../services/idleFinish';
 import { syncRun, syncPendingRuns } from '../services/runSync';
 import { calculateGpsDistance } from '../services/geo';
 
 export type RunStatus = 'idle' | 'running' | 'paused';
 
-const IDLE_FINISH_MESSAGE =
-  "You haven't moved for 5 minutes, so your run was finished. Any land you closed still counts.";
 const AUTO_FINISHED_MESSAGE =
   'Your run was finished automatically. Any land you closed still counts.';
 const RUN_CLOSED_BY_SERVER_MESSAGE =
@@ -307,9 +302,9 @@ export function useRunTracking({
     return () => clearInterval(timer);
   }, [runStatus]);
 
-  // Forgotten run (L3): finish it once the runner has not moved 20 m for 5
-  // minutes while running. Checked every 15 s here and on each background
-  // GPS fix; the background task may also have finished it already.
+  // Resting never finishes a run. Every 15 s, check whether the background
+  // task stopped this run because the server had already finished it
+  // (abandoned-run safety net), and tell the runner.
   useEffect(() => {
     if (runStatus !== 'running') return;
 
@@ -327,20 +322,17 @@ export function useRunTracking({
       }
       checking = true;
       try {
-        const finished = await finishIdleRunIfDue(stopBackgroundTracking);
-        if (finished) {
-          showRunEndedAutomatically(runId, IDLE_FINISH_MESSAGE);
-        } else if (
+        if (
           statusRef.current === 'running' &&
           activeRunIdRef.current === runId &&
           !busyRef.current &&
           (await getActiveRunId()) !== runId
         ) {
-          // The background task already finished it.
+          // The background task stopped it (the server had finished it).
           showRunEndedAutomatically(runId, AUTO_FINISHED_MESSAGE);
         }
       } catch (error) {
-        console.log('ILAQA: idle check failed:', error);
+        console.log('ILAQA: run state check failed:', error);
       } finally {
         checking = false;
       }
