@@ -10,6 +10,15 @@ namespace ILAQA.Services;
 // Access tokens (JWT) and refresh tokens.
 public sealed class JwtService(IConfiguration configuration)
 {
+    // FR-02: 15 minutes unless Jwt:ExpiryMinutes says otherwise
+    // (set it per environment, e.g. as Jwt__ExpiryMinutes on Azure).
+    private const int DefaultExpiryMinutes = 15;
+
+    private readonly int _expiryMinutes = configuration.GetValue("Jwt:ExpiryMinutes", DefaultExpiryMinutes);
+
+    // Sent to the app as "expiresIn".
+    public int AccessTokenSeconds => _expiryMinutes * 60;
+
     // A short-lived JWT tied to the user's current login session.
     public string GenerateToken(ApplicationUser user)
     {
@@ -31,7 +40,7 @@ public sealed class JwtService(IConfiguration configuration)
             issuer: configuration["Jwt:Issuer"],
             audience: configuration["Jwt:Audience"],
             claims: claims,
-            expires: DateTime.UtcNow.AddMinutes(int.Parse(configuration["Jwt:ExpiryMinutes"]!)),
+            expires: DateTime.UtcNow.AddMinutes(_expiryMinutes),
             signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
 
         return new JwtSecurityTokenHandler().WriteToken(token);

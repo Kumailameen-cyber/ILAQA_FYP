@@ -22,7 +22,6 @@ public sealed class AuthService(
     EmailService emailService,
     ILogger<AuthService> logger)
 {
-    private const int AccessTokenSeconds = 900;
     private const int MaxOtpAttempts = 5;
     private const string InvalidResetMessage = "Invalid or expired reset authorization.";
     private const string InvalidCodeMessage = "Invalid or expired verification code.";
@@ -272,7 +271,7 @@ public sealed class AuthService(
         await transaction.CommitAsync();
 
         return new LoginResponse("Login successful!", jwtService.GenerateToken(lockedUser), refreshToken,
-            "Bearer", AccessTokenSeconds,
+            "Bearer", jwtService.AccessTokenSeconds,
             new UserSummary(lockedUser.Id, lockedUser.UserName, lockedUser.DisplayName));
     }
 
@@ -328,7 +327,7 @@ public sealed class AuthService(
         await transaction.CommitAsync();
 
         return new TokenResponse("Tokens refreshed successfully!", jwtService.GenerateToken(user),
-            newRefreshToken, "Bearer", AccessTokenSeconds);
+            newRefreshToken, "Bearer", jwtService.AccessTokenSeconds);
     }
 
     // ===================== Logout =====================
