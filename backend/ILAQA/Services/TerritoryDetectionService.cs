@@ -880,6 +880,34 @@ namespace ILAQA.Services
                 endedAt.Value > now.AddDays(-retryWindowDays);
         }
 
+        // A run whose phone never sent Finish (battery died, app deleted) is
+        // finished by the server once no GPS has arrived for this long (L3).
+        // Long enough for an offline phone to come back and upload first.
+        public const int DefaultAbandonedRunHours = 6;
+
+        public static bool IsRunAbandoned(
+            string runStatus, DateTime startedAt, DateTime? lastFixAt,
+            DateTime now, TimeSpan limit)
+        {
+            if (runStatus != "Running" && runStatus != "Paused")
+                return false;
+
+            return now - (lastFixAt ?? startedAt) >= limit;
+        }
+
+        // Running time saved on the server up to endedAt: a running leg
+        // counts only until endedAt (the last GPS fix of an abandoned run).
+        public static int ActiveSecondsAt(
+            string runStatus, int savedActiveSeconds,
+            DateTime? activeStartedAt, DateTime endedAt)
+        {
+            if (runStatus != "Running" || activeStartedAt == null)
+                return savedActiveSeconds;
+
+            double seconds = (endedAt - activeStartedAt.Value).TotalSeconds;
+            return savedActiveSeconds + (int)Math.Floor(Math.Max(0, seconds));
+        }
+
         // New shield end after qualifying activity at activityTime (FR-18).
         // Counts from the activity itself, so a delayed retry gives no extra
         // protection, and never shortens a longer existing shield. Null when

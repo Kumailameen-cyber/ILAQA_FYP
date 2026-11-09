@@ -8,6 +8,7 @@ import {
   getRunSyncRecord,
   getUnuploadedRunPoints,
   markPointsUploaded,
+  markRunFinishRequested,
   markServerRunEnded,
 } from './runStorage';
 
@@ -17,7 +18,16 @@ export type SyncResult = {
   serverEnded: boolean;
   // True only for the sync that completed /end.
   endedNow: boolean;
+  // The server had already finished this run (6 hours without GPS) before
+  // the phone sent Finish; GPS recorded after that cannot be added.
+  closedByServer?: boolean;
 };
+
+// The server no longer accepts GPS for this run: it was already finished
+// (for example by the server after 6 hours without GPS). Matches the
+// backend's answer to an upload for a run that is not Running or Paused.
+const RUN_CLOSED_TEXT = 'cannot be uploaded to this run';
+class RunClosedOnServerError extends Error {}
 
 // The server limits GPS uploads per user (HTTP 429 + Retry-After). Points
 // stay in SQLite and the upload cursor only moves after an accepted batch,
@@ -88,6 +98,9 @@ async function postJson(path: string, body?: unknown): Promise<any> {
   }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
+    if (response.status === 409 && detail.includes(RUN_CLOSED_TEXT)) {
+      throw new RunClosedOnServerError(detail.slice(0, 180));
+    }
     throw new Error(
       `Run sync failed (HTTP ${response.status}): ${detail.slice(0, 180)}`
     );
@@ -133,17 +146,25 @@ async function syncOnce(runId: string): Promise<SyncResult> {
       throw new SyncRateLimitedError('Waiting before the next GPS upload.');
     }
 
-    const response = await postJson(
-      `/api/runs/${runId}/points`,
-      batch.map((p) => ({
-        sequenceNo: p.id,
-        legNo: p.legNo,
-        latitude: p.latitude,
-        longitude: p.longitude,
-        accuracyMeters: p.accuracy,
-        recordedAt: new Date(p.timestamp).toISOString(),
-      }))
-    );
+    let response: any;
+    try {
+      response = await postJson(
+        `/api/runs/${runId}/points`,
+        batch.map((p) => ({
+          sequenceNo: p.id,
+          legNo: p.legNo,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          accuracyMeters: p.accuracy,
+          recordedAt: new Date(p.timestamp).toISOString(),
+        }))
+      );
+    } catch (error) {
+      if (error instanceof RunClosedOnServerError) {
+        return acceptServerFinish(runId, initial.ownerUserId);
+      }
+      throw error;
+    }
 
     // Advance the cursor ONLY after the server has acknowledged this batch.
     lastUploadedId = batch[batch.length - 1].id;
@@ -196,6 +217,30 @@ async function syncOnce(runId: string): Promise<SyncResult> {
     confirmedTerritories,
     serverEnded: false,
     endedNow: false,
+  };
+}
+
+// The server finished this run before the phone did. Confirm with /end
+// (answers "already completed" and the run's land), then stop retrying it:
+// GPS recorded after the server's finish cannot be added any more.
+async function acceptServerFinish(
+  runId: string,
+  ownerUserId: string
+): Promise<SyncResult> {
+  const response = await postJson(`/api/runs/${runId}/end`);
+  let confirmedTerritories: ConfirmedTerritory[] = [];
+  if (Array.isArray(response.detectedTerritories)) {
+    confirmedTerritories = response.detectedTerritories;
+    await cacheConfirmedTerritories(ownerUserId, runId, confirmedTerritories);
+  }
+  await markRunFinishRequested(runId);
+  await markServerRunEnded(runId);
+  return {
+    newlyClaimedCount: 0,
+    confirmedTerritories,
+    serverEnded: true,
+    endedNow: true,
+    closedByServer: true,
   };
 }
 

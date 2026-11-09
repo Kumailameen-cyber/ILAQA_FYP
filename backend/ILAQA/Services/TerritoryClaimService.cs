@@ -524,6 +524,119 @@ namespace ILAQA.Services
             return result.Succeeded;
         }
 
+        // Finishes a Running or Paused run: territory work, then the run's
+        // end time, running time, status and official distance. Shared by
+        // the /end API and the abandoned-run job. The caller holds the
+        // transaction and a FOR UPDATE lock on the run. Returns the run to
+        // report (reloaded when territory work was rolled back).
+        public async Task<Run> CompleteRunAsync(
+            IDbContextTransaction transaction, Run run,
+            FinishTiming timing, DateTime now,
+            CancellationToken cancellationToken = default)
+        {
+            var runId = run.Id;
+
+            // Territory work may fail on unusual GPS; the run must still
+            // finish and keep its workout (FR-17). A failure is recorded as
+            // Failed and retried later. Shields count from the run's real end.
+            var processing = await ProcessFinishedRunAsync(
+                transaction, runId, run.UserId, timing.EndedAt, now);
+
+            if (!processing.Succeeded)
+                run = await _context.Runs.SingleAsync(
+                    r => r.Id == runId, cancellationToken);
+
+            run.ActiveSeconds = timing.ActiveSeconds;
+            run.EndedAt = timing.EndedAt;
+            run.ActiveStartedAt = null;
+            run.Status = "Completed";
+            run.ValidationStatus = TerritoryDetectionService.DecideValidationStatus(
+                processing.Succeeded, processing.ApprovedClaimCount);
+
+            // Official distance: cleaned walking/running distance (no GPS
+            // teleports or bad fixes); 0 for vehicle-speed runs.
+            if (processing.Analysis != null)
+                run.TotalDistanceMeters = processing.Analysis.GenuineDistanceMeters;
+
+            await _context.SaveChangesAsync(cancellationToken);
+            return run;
+        }
+
+        // Runs still Running or Paused whose last GPS fix (or start, with no
+        // GPS) is older than the limit (L3).
+        public async Task<List<Guid>> FindAbandonedRunIdsAsync(
+            DateTime now, TimeSpan limit,
+            CancellationToken cancellationToken = default)
+        {
+            var cutoff = now - limit;
+
+            return await _context.Runs
+                .AsNoTracking()
+                .Where(r => (r.Status == "Running" || r.Status == "Paused") &&
+                            (_context.RunGpsPoints
+                                 .Where(p => p.RunId == r.Id)
+                                 .Max(p => (DateTime?)p.RecordedAt) ?? r.StartedAt) <= cutoff)
+                .OrderBy(r => r.StartedAt)
+                .Select(r => r.Id)
+                .ToListAsync(cancellationToken);
+        }
+
+        // Finishes a run whose phone never sent Finish, as if Finish had
+        // been pressed at its last GPS fix. Checked again under the run
+        // lock, so a late upload that just arrived keeps the run open.
+        // Returns false when the run was not finished.
+        public async Task<bool> FinishAbandonedRunAsync(
+            Guid runId, DateTime now, TimeSpan limit,
+            CancellationToken cancellationToken = default)
+        {
+            await using var transaction =
+                await _context.Database.BeginTransactionAsync(cancellationToken);
+
+            var run = await _context.Runs
+                .FromSqlInterpolated(
+                    $"SELECT * FROM \"Runs\" WHERE \"Id\" = {runId} FOR UPDATE")
+                .SingleOrDefaultAsync(cancellationToken);
+
+            if (run == null)
+                return false;
+
+            var legFixes = await _context.RunGpsPoints
+                .AsNoTracking()
+                .Where(p => p.RunId == runId)
+                .Select(p => new RunGpsPoint
+                {
+                    SequenceNo = p.SequenceNo,
+                    LegNo = p.LegNo,
+                    RecordedAt = p.RecordedAt
+                })
+                .ToListAsync(cancellationToken);
+
+            DateTime? lastFix = legFixes.Count > 0
+                ? legFixes.Max(p => p.RecordedAt)
+                : null;
+
+            if (!TerritoryDetectionService.IsRunAbandoned(
+                    run.Status, run.StartedAt, lastFix, now, limit))
+                return false;
+
+            var endedAt = DateTime.SpecifyKind(
+                lastFix ?? run.StartedAt, DateTimeKind.Utc);
+            int serverActive = TerritoryDetectionService.ActiveSecondsAt(
+                run.Status, run.ActiveSeconds, run.ActiveStartedAt, endedAt);
+
+            var timing = TerritoryDetectionService.ResolveFinishTiming(
+                run.StartedAt, now, serverActive, endedAt, serverActive, legFixes);
+
+            run = await CompleteRunAsync(
+                transaction, run, timing, now, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "Finished abandoned run {RunId} at its last GPS fix ({ValidationStatus}).",
+                runId, run.ValidationStatus);
+            return true;
+        }
+
         // Road-snap poor GPS points of this run that were not checked yet
         // (FR-12). Each point is sent to Google at most once: a point Google
         // could not place believably stores its raw position as "checked".

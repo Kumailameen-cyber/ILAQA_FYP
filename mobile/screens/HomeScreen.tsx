@@ -37,13 +37,25 @@ import {
   saveRunTiming,
   ActiveRunState,
   getRunSyncRecord,
+  getActiveRunId,
 } from '../services/runStorage';
+import {
+  finishIdleRunIfDue,
+  stopRunClosedByServer,
+} from '../services/idleFinish';
 import {
   syncRun,
   syncPendingRuns,
   fetchSavedTerritories,
 } from '../services/runSync';
 
+
+const IDLE_FINISH_MESSAGE =
+  "You haven't moved for 5 minutes, so your run was finished. Any land you closed still counts.";
+const AUTO_FINISHED_MESSAGE =
+  'Your run was finished automatically. Any land you closed still counts.';
+const RUN_CLOSED_BY_SERVER_MESSAGE =
+  'This run had no GPS for over 6 hours, so the server had already finished it. GPS recorded after that could not be added.';
 
 type HomeScreenProps = {
   runnerId: string;
@@ -288,6 +300,14 @@ useEffect(() => {
           const result = await syncRun(current);
           if (result.endedNow) endedNow++;
           if (result.newlyClaimedCount > 0) newLand = true;
+
+          // The server had already finished this run (6 hours without
+          // GPS): stop recording into it on the phone.
+          if (result.serverEnded && !busyRef.current &&
+              activeRunIdRef.current === current &&
+              (await stopRunClosedByServer(current, stopBackgroundTracking))) {
+            if (mounted) showRunEndedAutomatically(current, RUN_CLOSED_BY_SERVER_MESSAGE);
+          }
         }
 
         endedNow += await syncPendingRuns(runnerId);
@@ -328,6 +348,66 @@ useEffect(() => {
     const timer = setInterval(updateTimer, 1000);
     return () => clearInterval(timer);
   }, [runStatus]);
+
+  // Forgotten run (L3): finish it once the runner has not moved 20 m for 5
+  // minutes while running. Checked every 15 s here and on each background
+  // GPS fix; the background task may also have finished it already.
+  useEffect(() => {
+    if (runStatus !== 'running') return;
+    let checking = false;
+    const check = async () => {
+      const runId = activeRunIdRef.current;
+      if (checking || busyRef.current || statusRef.current !== 'running' || !runId) return;
+      checking = true;
+      try {
+        const finished = await finishIdleRunIfDue(stopBackgroundTracking);
+        if (finished) {
+          showRunEndedAutomatically(runId, IDLE_FINISH_MESSAGE);
+        } else if (
+          statusRef.current === 'running' &&
+          activeRunIdRef.current === runId &&
+          !busyRef.current &&
+          (await getActiveRunId()) !== runId
+        ) {
+          showRunEndedAutomatically(runId, AUTO_FINISHED_MESSAGE);
+        }
+      } catch (error) {
+        console.log('ILAQA: idle check failed:', error);
+      } finally {
+        checking = false;
+      }
+    };
+    void check();
+    const timer = setInterval(() => { void check(); }, 15000);
+    return () => clearInterval(timer);
+  }, [runStatus]);
+
+  // Clears the run from the screen after it finished by itself, then sends
+  // its Finish and shows its land.
+  const showRunEndedAutomatically = (runId: string, message: string) => {
+    gpsSubscription.current?.remove();
+    gpsSubscription.current = null;
+    activeRunIdRef.current = null;
+    routeRef.current = [];
+    lastLivePointRef.current = null;
+    activeSegmentRef.current = [];
+    segmentStartedAtRef.current = null;
+    elapsedBeforeSegmentRef.current = 0;
+    setRouteSegments([]);
+    setDistanceMeters(0);
+    setElapsedSeconds(0);
+    updateRunStatus('idle');
+    Alert.alert('Run Finished', message);
+    void syncRun(runId)
+      .then(() => {
+        refreshTerritoriesRef.current();
+        setSyncMessage('');
+      })
+      .catch((error) => {
+        console.log('Finish queued for retry:', error);
+        setSyncMessage('Run saved locally. Finish sync pending.');
+      });
+  };
 
   const startGpsWatcher = async () => {
     gpsSubscription.current?.remove();

@@ -24,6 +24,7 @@ namespace ILAQA.Services
             CancellationToken stoppingToken)
         {
             // Run once when the backend starts.
+            await FinishAbandonedRunsAsync(stoppingToken);
             await MarkVulnerableAsync(stoppingToken);
             await RetryFailedRunsAsync(stoppingToken);
 
@@ -33,8 +34,61 @@ namespace ILAQA.Services
 
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                await FinishAbandonedRunsAsync(stoppingToken);
                 await MarkVulnerableAsync(stoppingToken);
                 await RetryFailedRunsAsync(stoppingToken);
+            }
+        }
+
+        // Finish runs whose phone never sent Finish and has sent no GPS for
+        // Territory:AbandonedRunHours (default 6). Each run gets its own scope
+        // and transaction, so one bad run cannot block the others (L3).
+        private async Task FinishAbandonedRunsAsync(
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                TimeSpan limit;
+                List<Guid> due;
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var configuration = scope.ServiceProvider
+                        .GetRequiredService<IConfiguration>();
+                    int hours = configuration.GetValue(
+                        "Territory:AbandonedRunHours",
+                        TerritoryDetectionService.DefaultAbandonedRunHours);
+                    limit = TimeSpan.FromHours(Math.Max(1, hours));
+
+                    due = await scope.ServiceProvider
+                        .GetRequiredService<TerritoryClaimService>()
+                        .FindAbandonedRunIdsAsync(now, limit, cancellationToken);
+                }
+
+                foreach (var runId in due)
+                {
+                    try
+                    {
+                        using var scope = _scopeFactory.CreateScope();
+                        await scope.ServiceProvider
+                            .GetRequiredService<TerritoryClaimService>()
+                            .FinishAbandonedRunAsync(runId, now, limit, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex,
+                            "Could not finish abandoned run {RunId}.", runId);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                // Normal application shutdown.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to look up abandoned runs.");
             }
         }
 
