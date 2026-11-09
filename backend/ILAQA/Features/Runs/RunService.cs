@@ -161,6 +161,7 @@ public sealed class RunService(
             .ToList();
 
         db.RunGpsPoints.AddRange(newPoints);
+        run.SyncedAt = DateTime.UtcNow; // Last successful sync from the phone.
         await db.SaveChangesAsync();
 
         var newlyClaimedCount = await ClaimLoopsDuringRunAsync(transaction, runId, userId);
@@ -271,6 +272,10 @@ public sealed class RunService(
                 run.StartedAt, now, serverActiveSeconds, request?.EndedAt, request?.ActiveSeconds, legFixes);
 
             run = await claims.CompleteRunAsync(transaction, run, timing, now);
+
+            // The phone's Finish reached the server.
+            run.SyncedAt = now;
+            await db.SaveChangesAsync();
         }
 
         var territories = await GetLandWonByRunAsync(runId, userId);
