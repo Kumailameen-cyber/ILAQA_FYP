@@ -3,13 +3,12 @@
 // Wi-Fi and mobile data) kept the map refresh and the GPS upload loop
 // waiting forever, until the app was reopened.
 
-export const REQUEST_TIMEOUT_MS = 20000;
+const REQUEST_TIMEOUT_MS = 20000;
 
 export async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
-  timeoutMs: number = REQUEST_TIMEOUT_MS,
-  fetchImpl: (url: string, init: RequestInit) => Promise<Response> = fetch
+  timeoutMs: number = REQUEST_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -22,7 +21,7 @@ export async function fetchWithTimeout(
   try {
     // Also stop waiting if the request ignores the abort signal.
     return await Promise.race([
-      fetchImpl(url, { ...init, signal: controller.signal }),
+      fetch(url, { ...init, signal: controller.signal }),
       timeout,
     ]);
   } finally {

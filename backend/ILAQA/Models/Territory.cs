@@ -1,29 +1,28 @@
-﻿using NetTopologySuite.Geometries;
+using NetTopologySuite.Geometries;
 
-namespace ILAQA.Models
+namespace ILAQA.Models;
+
+public class Territory
 {
-    public class Territory
-    {
-        public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = Guid.NewGuid();
 
-        public Guid? RunId { get; set; }
+    public Guid? RunId { get; set; }
 
-        public int LoopIndex { get; set; }
+    public int LoopIndex { get; set; }
 
-        public string OwnerUserId { get; set; } = string.Empty;
+    public string OwnerUserId { get; set; } = string.Empty;
 
-        public Polygon Boundary { get; set; } = null!;
+    public Polygon Boundary { get; set; } = null!;
 
-        public double AreaSquareMeters { get; set; }
+    public double AreaSquareMeters { get; set; }
 
-        public DateTime? ShieldExpiresAt { get; set; }
+    public DateTime? ShieldExpiresAt { get; set; }
 
-        public string Status { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
 
-        public Guid? MergedIntoTerritoryId { get; set; }
+    public Guid? MergedIntoTerritoryId { get; set; }
 
-        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
-    }
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

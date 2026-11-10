@@ -1,3 +1,5 @@
+// Backend address: EXPO_PUBLIC_API_URL from .env, otherwise port 5246 on the
+// computer running Expo.
 
 import Constants from 'expo-constants';
 

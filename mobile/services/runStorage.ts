@@ -1,8 +1,11 @@
+// Phone storage (SQLite) for runs: the active run and its timer, recorded
+// GPS points, the upload queue, and a cache of confirmed territories.
+
 import * as SQLite from 'expo-sqlite';
 
 const DATABASE_NAME = 'ilaqa_runs.db';
 
-export type StoredGpsPoint = {
+type StoredGpsPoint = {
   id: number;
   runId: string;
   latitude: number;
@@ -24,7 +27,7 @@ export type ConfirmedTerritory = {
   isShielded?: boolean;
 };
 
-export type RunSyncRecord = {
+type RunSyncRecord = {
   runId: string;
   ownerUserId: string;
   startedAt: string;
@@ -302,7 +305,7 @@ export async function clearActiveRun(): Promise<void> {
   await db.runAsync('DELETE FROM active_run WHERE id = 1');
 }
 
-// ==== Offline-safe upload queue (new) ====
+// ==== Offline-safe upload queue ====
 
 export async function registerRunForSync(
   runId: string,
@@ -433,39 +436,4 @@ export async function cacheConfirmedTerritories(
       ]
     );
   }
-}
-
-export async function getConfirmedTerritories(
-  ownerUserId: string
-): Promise<ConfirmedTerritory[]> {
-  await initializeRunStorage();
-  const db = await getDatabase();
-  const rows = await db.getAllAsync<{
-    territoryId: string;
-    loopIndex: number | null;
-    areaSquareMeters: number;
-    boundaryJson: string;
-  }>(
-    `SELECT territory_id AS territoryId, loop_index AS loopIndex,
-       area_square_meters AS areaSquareMeters,
-       boundary_json AS boundaryJson
-     FROM confirmed_territories WHERE owner_user_id = ?`,
-    [ownerUserId]
-  );
-  return rows.flatMap((row) => {
-    try {
-      const boundary = JSON.parse(row.boundaryJson);
-      if (!Array.isArray(boundary) || boundary.length < 4) return [];
-      return [
-        {
-          territoryId: row.territoryId,
-          loopIndex: row.loopIndex ?? undefined,
-          areaSquareMeters: row.areaSquareMeters,
-          boundary,
-        },
-      ];
-    } catch {
-      return [];
-    }
-  });
 }

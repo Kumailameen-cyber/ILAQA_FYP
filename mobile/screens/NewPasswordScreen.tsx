@@ -1,4 +1,7 @@
-import React, { useState } from 'react';
+// Forgot password, step 3: choose a new password with the reset token, or
+// cancel the reset and go back to Sign In.
+
+import { useState } from 'react';
 import {
   View,
   Text,
@@ -10,54 +13,62 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
-import AppPopup from '../components/AppPopup';
-
-import { API_URL } from '../config/api';
+import { MessagePopup, usePopup } from '../components/AppPopup';
+import { passwordResetStyles } from '../components/authStyles';
+import {
+  errorMessage,
+  postJson,
+  TOO_MANY_REQUESTS_MESSAGE,
+} from '../services/api';
 
 type Props = {
   email: string;
   resetToken: string;
   onResetSuccess: () => void;
-  onBack: () => Promise<void>;
-};
-
-type Popup = {
-  type: 'error' | 'warning' | 'success';
-  title: string;
-  message: string;
+  onResetCancelled: () => void;
 };
 
 export default function NewPasswordScreen({
   email,
   resetToken,
   onResetSuccess,
-  onBack,
+  onResetCancelled,
 }: Props) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [popup, setPopup] = useState<Popup | null>(null);
+  const { popup, showPopup, closePopup } = usePopup();
 
-  const showError = (message: string, title = 'SOMETHING WENT WRONG') => {
-    setPopup({ type: 'error', title, message });
-  };
+  const busy = loading || cancelling;
 
+  const showError = (message: string, title = 'SOMETHING WENT WRONG') =>
+    showPopup('error', title, message);
+
+  // Tells the server to drop the reset token, then returns to Sign In.
   const handleBackToLogin = async () => {
-    if (loading || cancelling) return;
+    if (busy) return;
 
     setCancelling(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      await onBack();
+      const { response, data } = await postJson(
+        '/api/auth/cancel-password-reset',
+        { email, resetToken }
+      );
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          throw new Error(TOO_MANY_REQUESTS_MESSAGE);
+        }
+        throw new Error(data?.message || 'Password reset cancellation failed.');
+      }
+
+      onResetCancelled();
     } catch (error) {
       showError(
-        error instanceof Error
-          ? error.message
-          : 'Unable to cancel password reset. Please try again.',
+        errorMessage(error, 'Unable to cancel password reset. Please try again.'),
         'CANNOT GO BACK'
       );
     } finally {
@@ -66,7 +77,7 @@ export default function NewPasswordScreen({
   };
 
   const handleResetPassword = async () => {
-    if (loading || cancelling) return;
+    if (busy) return;
 
     if (!newPassword || !confirmPassword) {
       showError('Please fill in both password fields.', 'MISSING PASSWORD');
@@ -79,35 +90,24 @@ export default function NewPasswordScreen({
     }
 
     setLoading(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      const response = await fetch(`${API_URL}/api/auth/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, resetToken, newPassword }),
+      const { response, data } = await postJson('/api/auth/reset-password', {
+        email,
+        resetToken,
+        newPassword,
       });
 
-      const data = await response.json().catch(() => null);
-
       if (response.status === 429) {
-        showError(
-          data?.message ||
-            'Too many requests. Please wait a minute before trying again.',
-          'TOO MANY REQUESTS'
-        );
+        showError(data?.message || TOO_MANY_REQUESTS_MESSAGE, 'TOO MANY REQUESTS');
         return;
       }
 
       if (!response.ok) {
-        const details = Array.isArray(data?.errors)
-          ? data.errors.join('\n')
-          : '';
-
+        const details = Array.isArray(data?.errors) ? data.errors.join('\n') : '';
         showError(
-          details ||
-            data?.message ||
-            'Unable to reset password. Please try again.',
+          details || data?.message || 'Unable to reset password. Please try again.',
           'RESET FAILED'
         );
         return;
@@ -143,66 +143,29 @@ export default function NewPasswordScreen({
         </Text>
 
         <Text style={styles.label}>NEW PASSWORD</Text>
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.passwordInput}
-            placeholder="Enter new password"
-            placeholderTextColor="#777777"
-            secureTextEntry={!showPassword}
-            autoCapitalize="none"
-            autoCorrect={false}
-            value={newPassword}
-            onChangeText={setNewPassword}
-            editable={!loading && !cancelling}
-            autoComplete="new-password"
-          />
-          <TouchableOpacity
-            onPress={() => setShowPassword((previous) => !previous)}
-            style={styles.visibilityButton}
-            disabled={loading || cancelling}
-          >
-            <Text style={styles.visibilityText}>
-              {showPassword ? 'HIDE' : 'SHOW'}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <NewPasswordField
+          placeholder="Enter new password"
+          value={newPassword}
+          onChangeText={setNewPassword}
+          disabled={busy}
+        />
 
         <Text style={styles.label}>CONFIRM PASSWORD</Text>
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.passwordInput}
-            placeholder="Confirm new password"
-            placeholderTextColor="#777777"
-            secureTextEntry={!showConfirmPassword}
-            autoCapitalize="none"
-            autoCorrect={false}
-            value={confirmPassword}
-            onChangeText={setConfirmPassword}
-            editable={!loading && !cancelling}
-            autoComplete="new-password"
-          />
-          <TouchableOpacity
-            onPress={() => setShowConfirmPassword((previous) => !previous)}
-            style={styles.visibilityButton}
-            disabled={loading || cancelling}
-          >
-            <Text style={styles.visibilityText}>
-              {showConfirmPassword ? 'HIDE' : 'SHOW'}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <NewPasswordField
+          placeholder="Confirm new password"
+          value={confirmPassword}
+          onChangeText={setConfirmPassword}
+          disabled={busy}
+        />
 
         <Text style={styles.hint}>
           Use a strong password that meets the registration requirements.
         </Text>
 
         <TouchableOpacity
-          style={[
-            styles.button,
-            (loading || cancelling) && styles.disabledButton,
-          ]}
+          style={[styles.button, busy && styles.disabledButton]}
           onPress={handleResetPassword}
-          disabled={loading || cancelling}
+          disabled={busy}
           activeOpacity={0.8}
         >
           {loading ? (
@@ -215,7 +178,7 @@ export default function NewPasswordScreen({
         <TouchableOpacity
           style={styles.backButton}
           onPress={handleBackToLogin}
-          disabled={loading || cancelling}
+          disabled={busy}
         >
           {cancelling ? (
             <ActivityIndicator color="#C6FF35" />
@@ -225,52 +188,52 @@ export default function NewPasswordScreen({
         </TouchableOpacity>
       </ScrollView>
 
-      <AppPopup
-        visible={popup !== null}
-        type={popup?.type ?? 'error'}
-        title={popup?.title ?? ''}
-        message={popup?.message ?? ''}
-        onClose={() => setPopup(null)}
-      />
+      <MessagePopup popup={popup} onClose={closePopup} />
     </KeyboardAvoidingView>
   );
 }
 
+// Password box with its own SHOW/HIDE toggle.
+function NewPasswordField({
+  placeholder,
+  value,
+  onChangeText,
+  disabled,
+}: {
+  placeholder: string;
+  value: string;
+  onChangeText: (text: string) => void;
+  disabled: boolean;
+}) {
+  const [visible, setVisible] = useState(false);
+
+  return (
+    <View style={styles.inputContainer}>
+      <TextInput
+        style={styles.passwordInput}
+        placeholder={placeholder}
+        placeholderTextColor="#777777"
+        secureTextEntry={!visible}
+        autoCapitalize="none"
+        autoCorrect={false}
+        value={value}
+        onChangeText={onChangeText}
+        editable={!disabled}
+        autoComplete="new-password"
+      />
+      <TouchableOpacity
+        onPress={() => setVisible((previous) => !previous)}
+        style={styles.visibilityButton}
+        disabled={disabled}
+      >
+        <Text style={styles.visibilityText}>{visible ? 'HIDE' : 'SHOW'}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0C0D0C' },
-  content: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 28,
-    paddingVertical: 48,
-  },
-  brand: {
-    color: '#C6FF35',
-    fontSize: 24,
-    fontWeight: '900',
-    letterSpacing: 2,
-    marginBottom: 45,
-  },
-  heading: {
-    color: '#FFFFFF',
-    fontSize: 32,
-    fontWeight: '900',
-    letterSpacing: -1,
-    marginBottom: 14,
-  },
-  description: {
-    color: '#A0A0A0',
-    fontSize: 15,
-    lineHeight: 23,
-    marginBottom: 35,
-  },
-  label: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    marginBottom: 10,
-  },
+  ...passwordResetStyles,
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -294,26 +257,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 19,
     marginBottom: 20,
-  },
-  button: {
-    backgroundColor: '#C6FF35',
-    paddingVertical: 18,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  disabledButton: { opacity: 0.6 },
-  buttonText: {
-    color: '#0C0D0C',
-    fontSize: 14,
-    fontWeight: '900',
-    letterSpacing: 1,
-  },
-  backButton: { alignItems: 'center', marginTop: 28, padding: 10 },
-  backText: {
-    color: '#C6FF35',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1,
   },
 });

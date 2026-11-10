@@ -1,5 +1,7 @@
+// Popups: the shared ILAQA popup card, plus a hook and wrapper for screens
+// that show one message at a time.
 
-import React from 'react';
+import { ComponentProps, useCallback, useState } from 'react';
 import {
   Modal,
   View,
@@ -44,7 +46,7 @@ export default function AppPopup({
         ? '#FFCC66'
         : '#C6FF35';
 
-  const iconName: React.ComponentProps<
+  const iconName: ComponentProps<
     typeof Ionicons
   >['name'] =
     type === 'success'
@@ -173,3 +175,42 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
 });
+
+export type PopupMessage = {
+  type: 'success' | 'error' | 'warning';
+  title: string;
+  message: string;
+};
+
+// State for a screen's message popup (null = hidden).
+export function usePopup() {
+  const [popup, setPopup] = useState<PopupMessage | null>(null);
+
+  const showPopup = useCallback(
+    (type: PopupMessage['type'], title: string, message: string) =>
+      setPopup({ type, title, message }),
+    []
+  );
+  const closePopup = useCallback(() => setPopup(null), []);
+
+  return { popup, showPopup, closePopup };
+}
+
+// AppPopup showing the message from usePopup.
+export function MessagePopup({
+  popup,
+  onClose,
+}: {
+  popup: PopupMessage | null;
+  onClose: () => void;
+}) {
+  return (
+    <AppPopup
+      visible={popup !== null}
+      type={popup?.type ?? 'error'}
+      title={popup?.title ?? ''}
+      message={popup?.message ?? ''}
+      onClose={onClose}
+    />
+  );
+}

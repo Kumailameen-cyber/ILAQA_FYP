@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+// Forgot password, step 2: enter the six-digit reset code. A correct code
+// returns a reset token for the New Password screen.
+
+import { useState } from 'react';
 import {
-  View,
   Text,
   TextInput,
   TouchableOpacity,
@@ -10,9 +12,10 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
-import AppPopup from '../components/AppPopup';
-
-import { API_URL } from '../config/api';
+import { MessagePopup, usePopup } from '../components/AppPopup';
+import { passwordResetStyles } from '../components/authStyles';
+import { useOtpCode } from '../hooks/useOtpCode';
+import { postJson, TOO_MANY_REQUESTS_MESSAGE } from '../services/api';
 
 type Props = {
   email: string;
@@ -20,66 +23,39 @@ type Props = {
   onBack: () => void;
 };
 
-type Popup = {
-  type: 'error' | 'warning' | 'success';
-  title: string;
-  message: string;
-};
-
 export default function VerifyResetOtpScreen({
   email,
   onVerified,
   onBack,
 }: Props) {
-  const [code, setCode] = useState('');
+  const { code, setCode, isCodeComplete, resendCountdown, restartCountdown } =
+    useOtpCode();
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
-  const [resendCountdown, setResendCountdown] = useState(60);
-  const [popup, setPopup] = useState<Popup | null>(null);
+  const { popup, showPopup, closePopup } = usePopup();
 
-  const showError = (message: string) => {
-    setPopup({ type: 'error', title: 'VERIFICATION ERROR', message });
-  };
-
-  const showSuccess = (message: string) => {
-    setPopup({ type: 'success', title: 'CODE REQUESTED', message });
-  };
-
-  useEffect(() => {
-    if (resendCountdown <= 0) return;
-
-    const timer = setTimeout(() => {
-      setResendCountdown((previous) => Math.max(0, previous - 1));
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [resendCountdown]);
+  const showError = (message: string) =>
+    showPopup('error', 'VERIFICATION ERROR', message);
 
   const handleVerify = async () => {
     if (loading || resending) return;
 
-    if (!/^[0-9]{6}$/.test(code)) {
+    if (!isCodeComplete) {
       showError('Please enter a valid six-digit code.');
       return;
     }
 
     setLoading(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      const response = await fetch(`${API_URL}/api/auth/verify-reset-otp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, code }),
+      const { response, data } = await postJson('/api/auth/verify-reset-otp', {
+        email,
+        code,
       });
 
-      const data = await response.json().catch(() => null);
-
       if (response.status === 429) {
-        showError(
-          data?.message ||
-            'Too many requests. Please wait a minute before trying again.'
-        );
+        showError(data?.message || TOO_MANY_REQUESTS_MESSAGE);
         return;
       }
 
@@ -88,20 +64,17 @@ export default function VerifyResetOtpScreen({
         return;
       }
 
-    
-if (
-  data?.verified !== true ||
-  typeof data?.resetToken !== 'string' ||
-  !data.resetToken
-) {
-  showError('Verification was not confirmed. Please try again.');
-  return;
-}
+      if (
+        data?.verified !== true ||
+        typeof data?.resetToken !== 'string' ||
+        !data.resetToken
+      ) {
+        showError('Verification was not confirmed. Please try again.');
+        return;
+      }
 
-// Pass the secure 15-minute reset token,
-// not the original six-digit OTP.
-onVerified(data.resetToken);
-
+      // Pass the secure 15-minute reset token, not the six-digit OTP.
+      onVerified(data.resetToken);
     } catch {
       showError('Unable to connect to the server.');
     } finally {
@@ -113,22 +86,15 @@ onVerified(data.resetToken);
     if (resending || loading || resendCountdown > 0) return;
 
     setResending(true);
-    setPopup(null);
+    closePopup();
 
     try {
-      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+      const { response, data } = await postJson('/api/auth/forgot-password', {
+        email,
       });
 
-      const data = await response.json().catch(() => null);
-
       if (response.status === 429) {
-        showError(
-          data?.message ||
-            'Too many requests. Please wait a minute before trying again.'
-        );
+        showError(data?.message || TOO_MANY_REQUESTS_MESSAGE);
         return;
       }
 
@@ -137,9 +103,11 @@ onVerified(data.resetToken);
         return;
       }
 
-      setResendCountdown(60);
+      restartCountdown();
       // Keep the entered code: it may still be valid.
-      showSuccess(
+      showPopup(
+        'success',
+        'CODE REQUESTED',
         'If a password reset is available for this email, a code will be sent. Check your inbox.'
       );
     } catch {
@@ -148,6 +116,8 @@ onVerified(data.resetToken);
       setResending(false);
     }
   };
+
+  const busy = loading || resending;
 
   return (
     <KeyboardAvoidingView
@@ -180,20 +150,17 @@ onVerified(data.resetToken);
           keyboardType="number-pad"
           maxLength={6}
           value={code}
-          onChangeText={(value) => setCode(value.replace(/[^0-9]/g, ''))}
-          editable={!loading && !resending}
+          onChangeText={setCode}
+          editable={!busy}
           autoFocus
           textAlign="center"
           textContentType="oneTimeCode"
         />
 
         <TouchableOpacity
-          style={[
-            styles.button,
-            (loading || resending) && styles.disabledButton,
-          ]}
+          style={[styles.button, busy && styles.disabledButton]}
           onPress={handleVerify}
-          disabled={loading || resending}
+          disabled={busy}
           activeOpacity={0.8}
         >
           {loading ? (
@@ -206,11 +173,10 @@ onVerified(data.resetToken);
         <TouchableOpacity
           style={[
             styles.resendButton,
-            (loading || resending || resendCountdown > 0) &&
-              styles.disabledButton,
+            (busy || resendCountdown > 0) && styles.disabledButton,
           ]}
           onPress={handleResend}
-          disabled={loading || resending || resendCountdown > 0}
+          disabled={busy || resendCountdown > 0}
         >
           <Text style={styles.resendText}>
             {resending
@@ -224,41 +190,19 @@ onVerified(data.resetToken);
         <TouchableOpacity
           style={styles.backButton}
           onPress={onBack}
-          disabled={loading || resending}
+          disabled={busy}
         >
           <Text style={styles.backText}>← CHANGE EMAIL</Text>
         </TouchableOpacity>
       </ScrollView>
 
-      <AppPopup
-        visible={popup !== null}
-        type={popup?.type ?? 'error'}
-        title={popup?.title ?? ''}
-        message={popup?.message ?? ''}
-        onClose={() => setPopup(null)}
-      />
+      <MessagePopup popup={popup} onClose={closePopup} />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0C0D0C',
-  },
-  content: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 28,
-    paddingVertical: 48,
-  },
-  brand: {
-    color: '#C6FF35',
-    fontSize: 24,
-    fontWeight: '900',
-    letterSpacing: 2,
-    marginBottom: 45,
-  },
+  ...passwordResetStyles,
   heading: {
     color: '#FFFFFF',
     fontSize: 30,
@@ -277,12 +221,12 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 35,
   },
-  label: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    marginBottom: 10,
+  otpHint: {
+    color: '#A0A0A0',
+    fontSize: 12,
+    lineHeight: 19,
+    marginTop: -18,
+    marginBottom: 24,
   },
   input: {
     backgroundColor: '#1B1D1B',
@@ -295,20 +239,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 10,
     marginBottom: 20,
-  },
-  button: {
-    backgroundColor: '#C6FF35',
-    paddingVertical: 18,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  disabledButton: { opacity: 0.6 },
-  buttonText: {
-    color: '#0C0D0C',
-    fontSize: 14,
-    fontWeight: '900',
-    letterSpacing: 1,
   },
   resendButton: {
     alignItems: 'center',
@@ -330,12 +260,5 @@ const styles = StyleSheet.create({
     color: '#A0A0A0',
     fontSize: 12,
     fontWeight: '700',
-  },
-  otpHint: {
-    color: '#A0A0A0',
-    fontSize: 12,
-    lineHeight: 19,
-    marginTop: -18,
-    marginBottom: 24,
   },
 });

@@ -1,5 +1,7 @@
+// Bottom navigation bar for the signed-in tabs (Home, Ranks, Races, Profile).
 
-import React from 'react';
+
+import { ComponentProps } from 'react';
 import {
   View,
   Text,
@@ -18,8 +20,8 @@ type BottomTabBarProps = {
 const tabs: {
   key: MainTab;
   label: string;
-  icon: React.ComponentProps<typeof Ionicons>['name'];
-  activeIcon: React.ComponentProps<typeof Ionicons>['name'];
+  icon: ComponentProps<typeof Ionicons>['name'];
+  activeIcon: ComponentProps<typeof Ionicons>['name'];
 }[] = [
   {
     key: 'home',
@@ -33,12 +35,12 @@ const tabs: {
     icon: 'stats-chart-outline',
     activeIcon: 'stats-chart',
   },
- {
-  key: 'races',
-  label: 'RACES',
-  icon: 'flag-outline',
-  activeIcon: 'flag',
-},
+  {
+    key: 'races',
+    label: 'RACES',
+    icon: 'flag-outline',
+    activeIcon: 'flag',
+  },
   {
     key: 'profile',
     label: 'PROFILE',

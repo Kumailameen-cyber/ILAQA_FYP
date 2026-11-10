@@ -1287,13 +1287,14 @@ namespace ILAQA.Tests
             Assert.Empty(result.AwardedPieces);
         }
 
-        // ----- Live takeover guard (fix #1) -----
-        // Taking a rival's land during a run would change their territory on
-        // everyone's map and reveal the runner's route. Such a claim waits
-        // until Finish. A claim that takes no one's land still applies live.
+        // ----- Live claiming (decision 10 Nov) -----
+        // An upload and Finish use exactly the same claim rules, so a closed
+        // loop is claimed the moment it closes. These are the rules applied.
 
+        // A rival's vulnerable land under the loop is taken straight away:
+        // only the covered part; the rival keeps the rest.
         [Fact]
-        public void ClaimOverVulnerableLandDuringRun_ShouldBePostponed()
+        public void ClaimOverVulnerableLandDuringRun_ShouldBeTakenStraightAway()
         {
             var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
                 Now.AddDays(-1));
@@ -1301,36 +1302,98 @@ namespace ILAQA.Tests
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
 
-            Assert.True(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.Null(result.RejectionReason);
+            var takeover = Assert.Single(result.Takeovers);
+            Assert.InRange(AreaOf(takeover.TakenPart), 4_900, 5_100);
+            Assert.InRange(AreaOf(Assert.Single(takeover.RemainingPieces)), 4_900, 5_100);
         }
 
         [Fact]
-        public void ClaimOverVulnerableLandAtFinish_ShouldBeApplied()
-        {
-            var vulnerable = Owned(Rival, Rect(50, 0, 150, 100), "Vulnerable",
-                Now.AddDays(-1));
-
-            var result = Service().ResolveClaim(
-                Rect(0, 0, 100, 100), Me, new List<Territory> { vulnerable }, Now);
-
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: true));
-        }
-
-        [Fact]
-        public void ClaimOnFreeLandDuringRun_ShouldApplyLive()
+        public void ClaimOnFreeLandDuringRun_ShouldClaimTheWholeLoop()
         {
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory>(), Now);
 
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.Null(result.RejectionReason);
+            Assert.InRange(result.AwardedAreaSquareMeters, 9_900, 10_100);
+            Assert.Empty(result.Takeovers);
         }
 
-        // Shielded rival land is never taken, so the free part applies live.
+        // A phone retries the same upload (bad signal): the loop it already
+        // claimed has the same claim key, so nothing new is planned.
         [Fact]
-        public void ClaimOverShieldedLandDuringRun_ShouldApplyFreePartLive()
+        public void SameUploadTwice_ShouldClaimNothingNew()
+        {
+            var service = Service();
+            var points = new Route()
+                .To(100, 0, WalkSpeed).To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed).To(0, 0, WalkSpeed)
+                .Build();
+
+            var first = service.PlanNewClaims(service.AnalyzeRun(points), NothingSubmitted);
+            var claimed = Assert.Single(first);
+
+            var retry = service.PlanNewClaims(service.AnalyzeRun(points), new[]
+            {
+                (claimed.Candidate.StartSequenceNo, claimed.Candidate.EndSequenceNo,
+                 claimed.Candidate.AreaSquareMeters)
+            });
+
+            Assert.Empty(retry);
+        }
+
+        // Block A was claimed live on an upload; the runner then closes block
+        // B and presses Finish. Finish plans only block B, never A again.
+        [Fact]
+        public void FinishAfterLiveClaim_ShouldClaimOnlyTheNewLoop()
+        {
+            var service = Service();
+            var route = new Route()
+                .To(100, 0, WalkSpeed).To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed).To(0, 0, WalkSpeed);       // block A
+            var liveUpload = route.Build().ToList();
+
+            var liveClaim = Assert.Single(
+                service.PlanNewClaims(service.AnalyzeRun(liveUpload), NothingSubmitted));
+
+            var wholeRun = route
+                .To(0, -150, WalkSpeed)                           // walk on to block B
+                .To(100, -150, WalkSpeed).To(100, -250, WalkSpeed)
+                .To(0, -250, WalkSpeed).To(0, -150, WalkSpeed)
+                .Build();
+
+            var atFinish = service.PlanNewClaims(service.AnalyzeRun(wholeRun), new[]
+            {
+                (liveClaim.Candidate.StartSequenceNo, liveClaim.Candidate.EndSequenceNo,
+                 liveClaim.Candidate.AreaSquareMeters)
+            });
+
+            var blockB = Assert.Single(atFinish);
+            Assert.Equal(TerritoryClaimStatuses.Approved, blockB.Status);
+            Assert.True(blockB.Candidate.StartSequenceNo > liveClaim.Candidate.EndSequenceNo);
+        }
+
+        // Two runners close a loop round the same free block at the same
+        // moment. The claim lock makes them go one at a time; the first one
+        // commits new land with a fresh 3-day shield, so the second finds it
+        // shielded and gets nothing (BR-04: first valid committed claim wins).
+        [Fact]
+        public void SecondRunnerRacingForTheSameBlock_ShouldGetNothing()
+        {
+            var firstWinner = Owned(Rival, Rect(0, 0, 100, 100), "Active",
+                Now.AddDays(TerritoryDetectionService.ShieldDays));
+
+            var second = Service().ResolveClaim(
+                Rect(0, 0, 100, 100), Me, new List<Territory> { firstWinner }, Now);
+
+            Assert.Equal(TerritoryRejectionReasons.Shielded, second.RejectionReason);
+            Assert.Empty(second.AwardedPieces);
+            Assert.Empty(second.Takeovers);
+        }
+
+        // Shielded rival land is never taken: only the free part is claimed.
+        [Fact]
+        public void ClaimOverShieldedLandDuringRun_ShouldClaimOnlyTheFreePart()
         {
             var shielded = Owned(Rival, Rect(-50, 0, 50, 100), "Active",
                 Now.AddDays(2));
@@ -1338,8 +1401,8 @@ namespace ILAQA.Tests
             var result = Service().ResolveClaim(
                 Rect(0, 0, 100, 100), Me, new List<Territory> { shielded }, Now);
 
-            Assert.False(TerritoryDetectionService.ShouldPostponeClaim(
-                result, runIsFinishing: false));
+            Assert.InRange(result.AwardedAreaSquareMeters, 4_900, 5_100);
+            Assert.Empty(result.Takeovers);
         }
 
         // ----- Shield and overlap helpers -----
@@ -1429,12 +1492,28 @@ namespace ILAQA.Tests
         }
 
         [Fact]
-        public void BikeRun_ShouldNotRefreshShield()
+        public void BikeRun_ShouldCountOnlyTheWalkedParts()
+        {
+            // Walk 120 m, bike 240 m, walk 120 m (decision 11 Nov): only the
+            // 240 m walked counts; the bike part earns nothing.
+            var analysis = Service().AnalyzeRun(BikeLoop());
+
+            Assert.InRange(analysis.GenuineDistanceMeters, 235, 245);
+        }
+
+        [Fact]
+        public void BikeRideOnly_ShouldEarnNoDistanceOrShield()
         {
             var service = Service();
-            var analysis = service.AnalyzeRun(BikeLoop());
+            var analysis = service.AnalyzeRun(new Route()
+                .To(200, 0, BikeSpeed)
+                .To(200, 200, BikeSpeed)
+                .To(0, 200, BikeSpeed)
+                .To(0, 0, BikeSpeed)
+                .Build());
 
             Assert.Equal(0, analysis.GenuineDistanceMeters);
+            Assert.Empty(analysis.Accepted);
             Assert.False(service.ShouldRefreshShield(analysis));
         }
 
@@ -1620,6 +1699,237 @@ namespace ILAQA.Tests
                 .Build();
 
             Assert.Empty(Service().FindTerritories(points));
+        }
+
+        // ----- Loop closure and lassos (decision 2, 10 Nov) -----
+
+        // Lasso: walk 150 m up a street, circle a 100 m x 100 m block, walk
+        // back down the same street. Only the block is land (10,000 m²);
+        // the street walked twice (the "tail") adds no area.
+        [Fact]
+        public void Lasso_ShouldClaimOnlyTheCircledBlock()
+        {
+            var points = new Route()
+                .To(0, 150, WalkSpeed)      // tail, going out
+                .To(100, 150, WalkSpeed)    // around the block
+                .To(100, 250, WalkSpeed)
+                .To(0, 250, WalkSpeed)
+                .To(0, 150, WalkSpeed)      // back at the crossing
+                .To(0, 0, WalkSpeed)        // tail, coming back
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+        }
+
+        // Lasso that does not come back: the block still counts on its own,
+        // because the route closes it where it crosses itself.
+        [Fact]
+        public void LassoWithoutWalkingBack_ShouldStillClaimTheBlock()
+        {
+            var points = new Route()
+                .To(0, 150, WalkSpeed)
+                .To(100, 150, WalkSpeed)
+                .To(100, 250, WalkSpeed)
+                .To(0, 250, WalkSpeed)
+                .To(0, 140, WalkSpeed)      // crosses its own path at (0,150)
+                .Build();
+
+            var block = Assert.Single(Service().AnalyzeRun(points).Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+        }
+
+        // Walking 300 m out and back on the same street encloses nothing.
+        [Fact]
+        public void LongOutAndBack_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(300, 0, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            Assert.Empty(Service().AnalyzeRun(points).Accepted);
+        }
+
+        // Out and back on the other side of the road (3 m apart): the thin
+        // strip between the two lines is rejected as too narrow, not land.
+        [Fact]
+        public void OutAndBackOnOtherSideOfRoad_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(300, 0, WalkSpeed)
+                .To(300, 3, WalkSpeed)
+                .To(0, 3, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Contains(analysis.Rejected, c =>
+                c.RejectionReason == TerritoryRejectionReasons.TooNarrow);
+        }
+
+        // Three sides of a block, ending 25 m from the start with no
+        // crossing: more than the 20 m closure limit, so no land, and the
+        // missing 25 m is never filled in.
+        [Fact]
+        public void EndingMoreThan20mFromStart_ShouldClaimNothing()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 25, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Empty(analysis.Rejected); // no area was even formed
+        }
+
+        // ----- Forgotten Finish, then a vehicle ride (decision 5 report) -----
+
+        // Decision 11 Nov: a vehicle ride only cancels the part of the run
+        // DURING the ride. A runner walks a 100 m block (400 m), forgets to
+        // press Finish and rides a rickshaw home at 7 m/s (25 km/h) for
+        // 600 m. The block walked before the ride is kept, and only the
+        // 400 m walk counts as distance.
+        [Fact]
+        public void ForgottenFinishThenRickshawRide_KeepsTheBlockWalkedBefore()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .To(0, -600, 7.0)           // rickshaw ride, no Finish pressed
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.True(analysis.VehicleSuspected);
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+            Assert.InRange(analysis.GenuineDistanceMeters, 390, 410);
+            Assert.True(Service().ShouldRefreshShield(analysis));
+        }
+
+        // Pressed Start, then rode a rickshaw 600 m, got off and ran a
+        // block straight away. The block counts; only the run counts as
+        // distance, not the ride.
+        [Fact]
+        public void RickshawRideThenRun_ShouldClaimTheBlockAfterDropOff()
+        {
+            var points = new Route()
+                .To(0, 600, 7.0)            // rickshaw
+                .To(100, 600, WalkSpeed)    // gets off and runs a block
+                .To(100, 700, WalkSpeed)
+                .To(0, 700, WalkSpeed)
+                .To(0, 600, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            var block = Assert.Single(analysis.Accepted);
+            Assert.InRange(block.AreaSquareMeters, 9_900, 10_100);
+            Assert.InRange(analysis.GenuineDistanceMeters, 390, 410);
+        }
+
+        // Walk block A, ride 600 m, run block B: both blocks count, and the
+        // distance is the two walks (800 m) without the ride.
+        [Fact]
+        public void BlockThenRideThenBlock_ShouldClaimBothBlocks()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)      // block A
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .To(0, -600, 7.0)           // ride
+                .To(100, -600, WalkSpeed)   // block B
+                .To(100, -700, WalkSpeed)
+                .To(0, -700, WalkSpeed)
+                .To(0, -600, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Equal(2, analysis.Accepted.Count);
+            Assert.InRange(analysis.GenuineDistanceMeters, 790, 810);
+        }
+
+        // Walking before and after a ride must never be joined into a loop.
+        // (1) The ride itself forms one side of the "block".
+        [Fact]
+        public void RideAsOneSideOfABlock_ShouldNotCloseALoop()
+        {
+            var points = new Route()
+                .To(200, 0, WalkSpeed)
+                .To(200, 200, WalkSpeed)
+                .To(0, 200, 7.0)            // rickshaw along the top side
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.Empty(analysis.Accepted);
+            Assert.Contains(analysis.Rejected, c =>
+                c.RejectionReason == TerritoryRejectionReasons.VehicleSpeed);
+        }
+
+        // (2) Two sides walked, a ride away and back to the same corner,
+        // then the last two sides walked. The block's sides were all walked,
+        // but they are joined only through the ride, so it is not land.
+        [Fact]
+        public void WalkedSidesBeforeAndAfterARide_ShouldNotJoinIntoALoop()
+        {
+            var points = new Route()
+                .To(200, 0, WalkSpeed)
+                .To(200, 200, WalkSpeed)
+                .To(800, 200, 7.0)          // ride away...
+                .To(200, 200, 7.0)          // ...and back to the same corner
+                .To(0, 200, WalkSpeed)
+                .To(0, 0, WalkSpeed)
+                .Build();
+
+            var analysis = Service().AnalyzeRun(points);
+
+            Assert.True(analysis.VehicleSuspected);
+            Assert.Empty(analysis.Accepted);
+        }
+
+        // Riding never counts towards the 200 m shield renewal: 150 m of
+        // walking plus a 2 km ride is still only 150 m.
+        [Fact]
+        public void ShortWalkPlusLongRide_ShouldNotRenewShields()
+        {
+            var service = Service();
+            var analysis = service.AnalyzeRun(new Route()
+                .To(150, 0, WalkSpeed)
+                .To(150, 2_000, 7.0)
+                .Build());
+
+            Assert.InRange(analysis.GenuineDistanceMeters, 145, 155);
+            Assert.False(service.ShouldRefreshShield(analysis));
+        }
+
+        // Guard for the test above: ending 15 m from the start (inside the
+        // 20 m limit) closes the block.
+        [Fact]
+        public void EndingWithin20mOfStart_ShouldClaimTheBlock()
+        {
+            var points = new Route()
+                .To(100, 0, WalkSpeed)
+                .To(100, 100, WalkSpeed)
+                .To(0, 100, WalkSpeed)
+                .To(0, 15, WalkSpeed)
+                .Build();
+
+            Assert.Single(Service().AnalyzeRun(points).Accepted);
         }
 
         // Standing still for 10 minutes: no fixes arrive (5 m distance
@@ -1970,36 +2280,11 @@ namespace ILAQA.Tests
                 8000, 11500);
         }
 
-        // ----- Map visibility (privacy, FR-21) -----
-
-        [Fact]
-        public void OwnTerritoryDuringRun_ShouldBeVisibleToOwner()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Me, "Running", Me));
-        }
-
-        [Fact]
-        public void OtherRunnersTerritoryDuringTheirRun_ShouldBeHidden()
-        {
-            Assert.False(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, "Running", Me));
-        }
-
-        [Fact]
-        public void OtherRunnersTerritoryAfterTheirRun_ShouldBeVisible()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, "Completed", Me));
-        }
-
-        // Split leftovers have no run of their own.
-        [Fact]
-        public void TerritoryWithoutRun_ShouldBeVisible()
-        {
-            Assert.True(TerritoryDetectionService.IsVisibleOnMap(
-                Rival, null, Me));
-        }
+        // Map visibility (decision 10 Nov): every Active or Vulnerable
+        // territory is shown to everyone as soon as it is claimed, also
+        // during the owner's run. Privacy is the owner label (tests above:
+        // private owners show "Anonymous profile"); GPS and routes are never
+        // sent to other runners.
 
         // ----- Run validation status at Finish (UC-02, UC-06) -----
 
