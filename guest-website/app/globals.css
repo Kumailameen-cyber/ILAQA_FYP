@@ -205,6 +205,17 @@ h3 {
   line-height: 0.99;
 }
 
+.hero-photo {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background-image: url("/runner-in.jpeg");
+  background-size: cover;
+  background-position: center 45%;
+  background-repeat: no-repeat;
+  animation: heroZoom 17s ease-in-out infinite alternate;
+}
+
 h1 {
   font-size: clamp(68px, 8.4vw, 132px);
   letter-spacing: -1.5px;
