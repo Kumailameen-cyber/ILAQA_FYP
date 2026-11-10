@@ -1,1179 +1,449 @@
 
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-
-import {
-  MapPin,
-  Trophy,
-  ShieldCheck,
-  Footprints,
-  Route,
-  Flag,
-  Sun,
-  Moon,
-  ArrowUpRight,
-  Menu,
-  X,
-  Target,
-  Lock,
-  Flame,
-  Search
-} from 'lucide-react';
+import { useState } from "react";
 
 const runners = [
-  {
-    name: 'Abdul Rehman',
-    handle: '@Abdul_runs',
-    area: 'Malir Cantt',
-    territory: 12.84,
-    distance: 186.2,
-    claims: 25,
-    streak: 12
-  },
-  {
-    name: 'Kumail A.',
-    handle: '@Ameenruns',
-    area: 'Nazimabad',
-    territory: 11.20,
-    distance: 174.8,
-    claims: 21,
-    streak: 9
-  },
-  {
-    name: 'Abdul Wasay',
-    handle: '@Wasay.moves',
-    area: 'DHA',
-    territory: 9.76,
-    distance: 160.3,
-    claims: 18,
-    streak: 16
-  },
-  {
-    name: 'Mustafa Imran',
-    handle: '@mustafa.athlete',
-    area: 'Clifton',
-    territory: 8.94,
-    distance: 142.1,
-    claims: 16,
-    streak: 7
-  },
-  {
-    name: 'Noor F.',
-    handle: '@noorf',
-    area: 'Gulshan',
-    territory: 8.41,
-    distance: 138.4,
-    claims: 14,
-    streak: 11
-  }
-];
-
-const territories = [
-  {
-    name: 'Malir Gaarison',
-    owner: 'Abdul Rehman',
-    area: 'Malir Cantt',
-    size: 0.42,
-    status: 'Shielded',
-    color: '#bbff32',
-    points: '15,50 33,43 39,65 30,82 13,74'
-  },
-  {
-    name: 'Al-Farooq Ground',
-    owner: 'Kumail A',
-    area: 'Nazimabad',
-    size: 0.38,
-    status: 'Shielded',
-    color: '#35d5c0',
-    points: '47,20 68,12 75,35 65,51 49,43'
-  },
-  {
-    name: 'Bukhari Park',
-    owner: 'Abdul Wasay',
-    area: 'DHA',
-    size: 0.24,
-    status: 'Vulnerable',
-    color: '#ffb450',
-    points: '78,57 93,51 97,73 87,84 75,77'
-  },
-  {
-    name: 'Garden Loop',
-    owner: 'Noor F.',
-    area: 'Gulshan',
-    size: 0.31,
-    status: 'Shielded',
-    color: '#8b9dff',
-    points: '48,69 63,63 68,85 56,96 44,85'
-  }
+  { name: "Abdul Rehman", area: "Malir Cantt", territory: 12.84, distance: 186.2, streak: 12 },
+  { name: "Kumail A.", area: "Nazimabad", territory: 11.2, distance: 174.8, streak: 9 },
+  { name: "Abdul Wasay", area: "DHA", territory: 9.76, distance: 160.3, streak: 16 },
+  { name: "Mustafa Imran", area: "Clifton", territory: 8.94, distance: 142.1, streak: 7 },
+  { name: "Noor F.", area: "Gulshan", territory: 8.41, distance: 138.4, streak: 11 },
 ];
 
 const competitions = [
   {
-    name: 'Clifton Coastline',
-    type: 'Zone Race',
-    date: 'Oct 24 – Nov 02',
+    name: "Clifton Coastline",
+    type: "ZONE RACE",
+    date: "24 OCT - 02 NOV",
     runners: 84,
-    status: 'Upcoming',
-    description: 'Claim the most territory within the coastline zone.'
+    description: "Claim the most territory along the coastline.",
   },
   {
-    name: 'Campus 250 Relay',
-    type: 'Distance Race',
-    date: 'Nov 05 – Nov 12',
+    name: "Campus 250 Relay",
+    type: "DISTANCE RACE",
+    date: "05 NOV - 12 NOV",
     runners: 48,
-    status: 'Upcoming',
-    description: 'Every kilometer counts. Race your university rivals.'
+    description: "Every kilometre counts. Race your university rivals.",
   },
   {
-    name: 'Karachi Sprint Week',
-    type: 'Distance Race',
-    date: 'Sep 12 – Sep 19',
+    name: "Karachi Sprint Week",
+    type: "CITY CHALLENGE",
+    date: "12 SEP - 19 SEP",
     runners: 62,
-    status: 'Completed',
-    description: 'A city-wide challenge to cover the most distance.'
-  }
+    description: "A city-wide challenge to cover the most distance.",
+  },
 ];
 
-const pages = [
-  'Home',
-  'Explore Map',
-  'Leaderboard',
-  'Competitions',
-  'How It Works'
+const navigation = [
+  { id: "home", label: "Home" },
+  { id: "map", label: "Explore Map" },
+  { id: "leaderboard", label: "Leaderboard" },
+  { id: "competitions", label: "Competitions" },
+  { id: "how-it-works", label: "How It Works" },
 ];
 
-function TerritoryMap({ selected, setSelected }) {
+function Arrow() {
+  return <span aria-hidden="true">↗</span>;
+}
+
+function PodiumCard({ runner, rank }) {
   return (
-    <div className="map-canvas">
-      <div className="map-background" />
-
-      <div className="map-caption">
-        KARACHI · MAP PREVIEW
+    <article className={`podium-card podium-${rank}`}>
+      {rank === 1 && <span className="crown">♛</span>}
+      <div className="podium-rank">
+        {String(rank).padStart(2, "0")} /{" "}
+        {rank === 1 ? "CHAMPION" : rank === 2 ? "SILVER" : "BRONZE"}
       </div>
-
-      <svg
-        className="territory-overlay"
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label="Illustrative territory boundaries over Karachi map preview"
-      >
-        {territories.map((territory, index) => (
-          <polygon
-            key={territory.name}
-            points={territory.points}
-            fill={territory.color}
-            fillOpacity={selected === index ? 0.32 : 0.16}
-            stroke={territory.color}
-            strokeWidth={selected === index ? 0.8 : 0.48}
-            vectorEffect="non-scaling-stroke"
-            onClick={() => setSelected(index)}
-            className="territory-polygon"
-          />
-        ))}
-      </svg>
-
-      <span className="map-label one">
-        CLIFTON
-      </span>
-
-      <span className="map-label two">
-        KARACHI
-      </span>
-
-      <span className="map-label three">
-        SEAVIEW
-      </span>
-
-      <span className="map-bottom">
-        ● PUBLIC TERRITORY OVERVIEW · DEMO
-      </span>
-    </div>
+      <div className="runner-avatar">
+        {runner.name
+          .split(" ")
+          .map((word) => word[0])
+          .join("")
+          .slice(0, 2)}
+      </div>
+      <h3>{runner.name}</h3>
+      <p>{runner.area}</p>
+      <strong>
+        {runner.territory.toFixed(2)} <small>km²</small>
+      </strong>
+    </article>
   );
 }
 
-function LeaderTable({ area, sort, setArea, setSort }) {
-  const filtered = runners
-    .filter((runner) => {
-      return area === 'All Areas' || runner.area === area;
-    })
-    .sort((a, b) => {
-      return b[sort] - a[sort];
-    });
+export default function Home() {
+  const [theme, setTheme] = useState("dark");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [area, setArea] = useState("All Areas");
 
-  return (
-    <div className="panel leaderboard-panel">
-      <div className="panel-top">
-        <div>
-          <span className="eyebrow">
-            CITY RANKINGS
-          </span>
+  const areas = [
+    "All Areas",
+    ...new Set(runners.map((runner) => runner.area)),
+  ];
 
-          <h3>
-            TOP RUNNERS
-            <ArrowUpRight size={22} />
-          </h3>
-        </div>
+  const filteredRunners =
+    area === "All Areas"
+      ? runners
+      : runners.filter((runner) => runner.area === area);
 
-        <div className="filters">
-          <select
-            aria-label="Filter runners by area"
-            value={area}
-            onChange={(event) => setArea(event.target.value)}
-          >
-            {['All Areas', 'Clifton', 'DHA', 'Gulshan', 'Nazimabad', 'Malir Cantt'].map((item) => (
-              <option key={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-
-          {[
-            ['territory', 'Territory'],
-            ['distance', 'Distance'],
-            // ['claims', 'Claims'],
-            ['streak', 'Streak']
-          ].map(([key, label]) => (
-            <button
-              key={key}
-              className={sort === key ? 'active' : ''}
-              onClick={() => setSort(key)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>RANK / RUNNER</th>
-              <th>AREA</th>
-              <th>AREA CLAIMED</th>
-              <th>DISTANCE</th>
-              <th>CLAIMS</th>
-              <th>STREAK</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            {filtered.map((runner, index) => (
-              <tr key={runner.name}>
-                <td>
-                  <span className="rank">
-                    {String(index + 1).padStart(2, '0')}
-                  </span>
-
-                  <span className="avatar">
-                    {runner.name
-                      .split(' ')
-                      .map((part) => part[0])
-                      .join('')}
-                  </span>
-
-                  <span>
-                    <strong>
-                      {runner.name}
-                    </strong>
-
-                    <small>
-                      {runner.handle}
-                    </small>
-                  </span>
-                </td>
-
-                <td>{runner.area}</td>
-
-                <td>
-                  {runner.territory.toFixed(2)} km²
-                </td>
-
-                <td>
-                  {runner.distance.toFixed(1)} km
-                </td>
-
-                <td>
-                  {runner.claims}
-                </td>
-
-                <td className="lime">
-                  {runner.streak} days
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {filtered.length === 0 && (
-        <p>No runners in this area yet.</p>
-      )}
-    </div>
-  );
-}
-
-export default function Page() {
-  const [page, setPage] = useState('Home');
-  const [dark, setDark] = useState(true);
-  const [menu, setMenu] = useState(false);
-  const [selected, setSelected] = useState(0);
-  const [area, setArea] = useState('All Areas');
-  const [sort, setSort] = useState('territory');
-  const [status, setStatus] = useState('All');
-  const [search, setSearch] = useState('');
-  const [competitionFilter, setCompetitionFilter] = useState('All');
-
-  useEffect(() => {
-    const saved = localStorage.getItem('ilaqa-theme');
-
-    if (saved) {
-      setDark(saved === 'dark');
-    }
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = dark
-      ? 'dark'
-      : 'light';
-
-    localStorage.setItem(
-      'ilaqa-theme',
-      dark ? 'dark' : 'light'
-    );
-  }, [dark]);
-
-  function go(next) {
-    setPage(next);
-    setMenu(false);
-
-    window.scrollTo({
-      top: 0,
-      behavior: 'smooth'
+  function navigate(id) {
+    setMenuOpen(false);
+    document.getElementById(id)?.scrollIntoView({
+      behavior: "smooth",
     });
   }
 
-  const selectedTerritory = territories[selected];
-
   return (
-    <>
-      <div className="top-strip">
-        ● THE CITY IS YOUR PLAYGROUND
-
-        <span>/</span>
-
-        KARACHI, PAKISTAN
-
-        {/* <span className="top-right">
-          FYP PREVIEW EXPERIENCE ↗
-        </span> */}
-      </div>
-
-      <header className="header">
-        <div className="container nav">
+    <div className="site" data-theme={theme}>
+      <header className="site-header">
+        <div className="container header-inner">
           <button
             className="brand"
-            onClick={() => go('Home')}
+            onClick={() => navigate("home")}
           >
-          <span className="brand-icon"> 
-            <img
-             src="/ilaqa-logo.jpg"
-             alt="ILAQA Logo"
-            className="logo-image"
-           />
-          </span>
-
-            ILAQA<span className="lime">.</span>
+            <img src="/ilaqa-logo.jpg" alt="ILAQA logo" />
+            <span>
+              ILAQA<span className="accent">.</span>
+            </span>
           </button>
 
-          <nav className={menu ? 'nav-links open' : 'nav-links'}>
-            {pages.map((item) => (
+          <nav className={`nav-links ${menuOpen ? "open" : ""}`}>
+            {navigation.map((item) => (
               <button
-                key={item}
-                onClick={() => go(item)}
-                className={page === item ? 'current' : ''}
+                key={item.id}
+                onClick={() => navigate(item.id)}
               >
-                {item}
+                {item.label}
               </button>
             ))}
           </nav>
 
-          <div className="nav-actions">
+          <div className="header-actions">
             <button
               className="theme-toggle"
-              aria-label={
-                dark
-                  ? 'Switch to light mode'
-                  : 'Switch to dark mode'
+              onClick={() =>
+                setTheme(theme === "dark" ? "light" : "dark")
               }
-              onClick={() => setDark(!dark)}
+              aria-label="Toggle theme"
             >
-              {dark ? (
-                <Sun size={21} />
-              ) : (
-                <Moon size={21} />
-              )}
+              {theme === "dark" ? "☾" : "☀"}
             </button>
 
             <button
-              className="mobile-menu"
-              onClick={() => setMenu(!menu)}
-              aria-label="Toggle menu"
+              className="menu-toggle"
+              onClick={() => setMenuOpen(!menuOpen)}
+              aria-label="Toggle navigation"
             >
-              {menu ? <X /> : <Menu />}
+              ☰
             </button>
           </div>
         </div>
       </header>
 
       <main>
-        {page === 'Home' && (
-          <>
-            <section className="hero container">
-              <div>
-                <span className="eyebrow dot">
-                  THE WORLD IS YOUR ARENA
+        {/* HERO */}
+        <section className="hero" id="home">
+          <div className="hero-photo" />
+          <div className="hero-shade" />
+
+          <div className="container hero-content">
+            <div className="hero-copy">
+              <div className="eyebrow">
+                THE WORLD IS YOUR ARENA
+                <span className="eyebrow-line" />
+              </div>
+
+              <h1>
+                <span>RUN YOUR CITY.</span>
+                <span>
+                  OWN YOUR <em>ILAQA.</em>
                 </span>
+              </h1>
 
-                <h1>
-                  RUN YOUR
-                  <br />
-                  CITY.
-                  <br />
-
-                  <span className="lime">
-                    OWN YOUR
-                    <br />
-                    <i>ILAQA.</i>
-                  </span>
-                </h1>
-
-                <p>
-                  Every street is a challenge. Every loop is a
-                  chance to claim your ground. Turn your everyday
-                  run into a real-world game of territory, rivalry,
-                  and glory.
-                </p>
-
-                <div className="button-row">
-                  <button
-                    className="btn primary"
-                    onClick={() => go('Explore Map')}
-                  >
-                    EXPLORE THE MAP
-                    <ArrowUpRight size={18} />
-                  </button>
-
-                  <button
-                    className="btn outline"
-                    onClick={() => go('How It Works')}
-                  >
-                    HOW IT WORKS
-                  </button>
-                </div>
-              </div>
-
-              <div className="hero-map">
-                <TerritoryMap
-                  selected={selected}
-                  setSelected={setSelected}
-                />
-
-                <div className="floating-stat">
-                  ◎ TERRITORY CAPTURED
-
-                  <strong>+0.42 KM²</strong>
-                </div>
-              </div>
-            </section>
-
-            <section className="section container">
-              <span className="eyebrow dot">
-                THE GAME HAS CHANGED
-              </span>
-
-              <h2>NOT JUST A RUN. A TAKEOVER.</h2>
-
-              <p className="section-intro">
-                Your city becomes the playing field.
-                The more you move, the more you own.
+              <p>
+                Every street is a challenge. Every loop is a chance
+                to claim your ground. Turn your everyday run into
+                a real-world game of territory, rivalry, and glory.
               </p>
 
-              <div className="three-grid">
-                {[
-                  {
-                    n: '01 / CLAIM',
-                    icon: <MapPin />,
-                    title: 'OWN THE STREETS',
-                    body: 'Complete a valid closed loop around a real-world block or park to capture its territory.'
-                  },
-                  {
-                    n: '02 / COMPETE',
-                    icon: <Trophy />,
-                    title: 'CLIMB THE RANKS',
-                    body: 'Race other runners, conquer the leaderboards and make your mark across the city.'
-                  },
-                  {
-                    n: '03 / DEFEND',
-                    icon: <ShieldCheck />,
-                    title: 'DEFEND YOUR ILAQA',
-                    body: 'Stay active to keep your territory protected. Go inactive and rivals can take over.'
-                  }
-                ].map((card) => (
-                  <article
-                    className="feature-card"
-                    key={card.n}
-                  >
-                    <span className="eyebrow">
-                      {card.n}
-                    </span>
-
-                    <div className="feature-icon">
-                      {card.icon}
-                    </div>
-
-                    <h3>{card.title}</h3>
-
-                    <p>{card.body}</p>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="section map-feature">
-              <div className="container map-feature-inner">
-                <div>
-                  <span className="eyebrow dot">
-                    THE BATTLEFIELD
-                  </span>
-
-                  <h2>
-                    THE MAP
-                    <br />
-                    IS <span className="lime">ALIVE.</span>
-                  </h2>
-
-                  <p>
-                    Explore the territories runners are claiming
-                    across Karachi. Every shape tells a story of
-                    a run, a challenge, and a victory.
-                  </p>
-
-                  <div className="legend">
-                    <span>🟢 SHIELDED TERRITORY</span>
-                    <span>🟠 VULNERABLE TERRITORY</span>
-                    <span>🔵 ACTIVE CLAN AREA</span>
-                  </div>
-
-                  <button
-                    className="btn primary"
-                    onClick={() => go('Explore Map')}
-                  >
-                    OPEN TERRITORY MAP
-                    <ArrowUpRight size={18} />
-                  </button>
-                </div>
-
-                <TerritoryMap
-                  selected={selected}
-                  setSelected={setSelected}
-                />
-              </div>
-            </section>
-
-            <section className="section container">
-              <div className="section-heading">
-                <div>
-                  <span className="eyebrow dot">
-                    THE CITY'S FINEST
-                  </span>
-
-                  <h2>THE ONES TO BEAT.</h2>
-
-                  <p>
-                    Big miles. Bigger territories.
-                    See who's setting the pace.
-                  </p>
-                </div>
+              <div className="hero-buttons">
+                <button
+                  className="btn btn-primary"
+                  onClick={() => navigate("map")}
+                >
+                  EXPLORE TERRITORIES <Arrow />
+                </button>
 
                 <button
-                  className="btn outline"
-                  onClick={() => go('Leaderboard')}
+                  className="btn btn-outline"
+                  onClick={() => navigate("how-it-works")}
                 >
-                  FULL LEADERBOARD
-                  <ArrowUpRight size={18} />
+                  ▷ HOW IT WORKS
                 </button>
-              </div>
-
-              <LeaderTable
-                area={area}
-                sort={sort}
-                setArea={setArea}
-                setSort={setSort}
-              />
-            </section>
-
-            <section className="cta">
-              <div className="container cta-inner">
-                <div>
-                  <span className="eyebrow">
-                    YOUR CITY IS WAITING
-                  </span>
-
-                  <h2>
-                    STOP SCROLLING.
-                    <br />
-                    <span>START CLAIMING.</span>
-                  </h2>
-
-                  <p>
-                    Make every kilometer count.
-                    Your next run could change the map.
-                  </p>
-                </div>
-
-                <button
-                  className="btn black"
-                  onClick={() => go('How It Works')}
-                >
-                  DISCOVER ILAQA
-                  <ArrowUpRight size={18} />
-                </button>
-              </div>
-            </section>
-          </>
-        )}
-
-        {page === 'Explore Map' && (
-          <section className="section container page-section">
-            <span className="eyebrow dot">
-              THE BATTLEFIELD / KARACHI
-            </span>
-
-            <h1 className="page-title">
-              EXPLORE <span className="lime">ILAQA.</span>
-            </h1>
-
-            <p className="section-intro">
-              Discover the territory being claimed across the city.
-              Select a highlighted zone for public details.
-            </p>
-
-            <div className="map-controls">
-              <div className="search">
-                <Search size={17} />
-
-                <input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search territories..."
-                />
-              </div>
-
-              <div className="filters">
-                {['All', 'Shielded', 'Vulnerable'].map((item) => (
-                  <button
-                    key={item}
-                    className={status === item ? 'active' : ''}
-                    onClick={() => setStatus(item)}
-                  >
-                    {item}
-                  </button>
-                ))}
               </div>
             </div>
 
-            <div className="explore-layout">
-              <TerritoryMap
-                selected={selected}
-                setSelected={setSelected}
-              />
-
-              <aside>
-                <div className="panel detail-panel">
-                  <span className="eyebrow">
-                    SELECTED TERRITORY
-                  </span>
-
-                  <h3>
-                    <span className="lime">●</span>
-                    {' '}
-                    {selectedTerritory.name}
-                  </h3>
-
+            <div className="hero-steps">
+              <div className="hero-step">
+                <div className="hero-step-icon">◎</div>
+                <div>
+                  <h3><em>01</em> RUN</h3>
                   <p>
-                    Owned by {selectedTerritory.owner}
-                  </p>
-
-                  <div className="stat-grid">
-                    <div>
-                      <strong>
-                        {selectedTerritory.size.toFixed(2)} km²
-                      </strong>
-
-                      <small>AREA CLAIMED</small>
-                    </div>
-
-                    <div>
-                      <strong className="lime">
-                        {selectedTerritory.status}
-                      </strong>
-
-                      <small>PROTECTION</small>
-                    </div>
-                  </div>
-
-                  <p className="privacy-small">
-                    <Lock size={15} />
-                    Public territory boundary only.
-                    No live GPS is displayed.
+                    Take on the streets and rack up distance
+                    with every run.
                   </p>
                 </div>
+              </div>
 
-                <div className="panel territory-list">
-                  <span className="eyebrow">
-                    NEARBY TERRITORIES
-                  </span>
-
-                  {territories
-                    .map((territory, index) => ({
-                      territory,
-                      index
-                    }))
-                    .filter(({ territory }) => {
-                      const matchesStatus =
-                        status === 'All' ||
-                        territory.status === status;
-
-                      const matchesSearch =
-                        `${territory.name} ${territory.area}`
-                          .toLowerCase()
-                          .includes(search.toLowerCase());
-
-                      return matchesStatus && matchesSearch;
-                    })
-                    .map(({ territory, index }) => (
-                      <button
-                        key={territory.name}
-                        className={
-                          selected === index ? 'selected' : ''
-                        }
-                        onClick={() => setSelected(index)}
-                      >
-                        <span style={{ color: territory.color }}>
-                          ●
-                        </span>
-
-                        <span>
-                          <strong>
-                            {territory.name}
-                          </strong>
-
-                          <small>
-                            {territory.area} ·{' '}
-                            {territory.size.toFixed(2)} km²
-                          </small>
-                        </span>
-
-                        <ArrowUpRight size={15} />
-                      </button>
-                    ))}
+              <div className="hero-step">
+                <div className="hero-step-icon">⬡</div>
+                <div>
+                  <h3><em>02</em> CLOSE THE LOOP</h3>
+                  <p>
+                    Complete a closed route to create a valid
+                    territory on the map.
+                  </p>
                 </div>
-              </aside>
+              </div>
+
+              <div className="hero-step">
+                <div className="hero-step-icon">◇</div>
+                <div>
+                  <h3><em>03</em> CLAIM YOUR AREA</h3>
+                  <p>
+                    Capture the area, grow your footprint,
+                    and compete to dominate the city.
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div className="privacy-banner">
-              <Lock size={20} />
+            <button
+              className="scroll-indicator"
+              onClick={() => navigate("leaderboard")}
+            >
+              SCROLL TO EXPLORE
+              <span>↓</span>
+            </button>
+          </div>
+        </section>
 
+        {/* MOVING TICKER */}
+        <div className="ticker">
+          <div className="ticker-track">
+            {Array.from({ length: 4 }, (_, index) => (
+              <span key={index}>
+                RUN <b>//</b> CAPTURE <b>//</b> DEFEND <b>//</b>{" "}
+                CONQUER <b>//</b>
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* LEADERBOARD */}
+        <section className="section elite-section" id="leaderboard">
+          <div className="container">
+            <div className="section-heading">
               <div>
-                <strong>PRIVACY FIRST. ALWAYS.</strong>
-
+                <div className="section-eyebrow">
+                  THE CITY'S FINEST
+                </div>
+                <h2>
+                  THE <em>ELITE.</em>
+                </h2>
                 <p>
-                  Only public territory polygons and statistics
-                  appear here. Real-time GPS coordinates and
-                  private routes are never exposed.
+                  The streets remember who owns them.
+                  Make your mark.
                 </p>
               </div>
             </div>
 
-            <p className="demo-note">
-              Map is a visual demo placeholder. Add a licensed
-              Karachi map screenshot as{' '}
-              <code>public/karachi-map.jpg</code> to display
-              a real map background. Territory positions
-              are illustrative.
-            </p>
-          </section>
-        )}
+            <div className="elite-layout">
+              <div className="podium">
+                <PodiumCard runner={runners[1]} rank={2} />
+                <PodiumCard runner={runners[0]} rank={1} />
+                <PodiumCard runner={runners[2]} rank={3} />
+              </div>
 
-        {page === 'Leaderboard' && (
-          <section className="section container page-section">
-            <span className="eyebrow dot">
-              RUNNERS / RANKINGS
-            </span>
+              <div className="rankings-panel">
+                <div className="rankings-heading">
+                  <h3>TOP RUNNERS ↗</h3>
 
-            <h1 className="page-title">
-              THE <span className="lime">LEADERBOARD.</span>
-            </h1>
-
-            <p className="section-intro">
-              See who's taking over the city.
-              Filter by Karachi area and ranking category.
-            </p>
-
-            <div className="podium">
-              {[
-                runners[1],
-                runners[0],
-                runners[2]
-              ].map((runner, index) => (
-                <div
-                  key={runner.name}
-                  className={
-                    'podium-card ' +
-                    (index === 1 ? 'winner' : '')
-                  }
-                >
-                  <span className="podium-rank">
-                    #
-                    {index === 1 ? 1 : index === 0 ? 2 : 3}
-                  </span>
-
-                  {index === 1 && (
-                    <Trophy className="lime" />
-                  )}
-
-                  <div className="avatar large">
-                    {runner.name
-                      .split(' ')
-                      .map((part) => part[0])
-                      .join('')}
-                  </div>
-
-                  <strong>
-                    {runner.name}
-                  </strong>
-
-                  <small>
-                    {runner.handle}
-                  </small>
-
-                  <b>
-                    {runner.territory.toFixed(2)}{' '}
-                    <small>km²</small>
-                  </b>
+                  <select
+                    value={area}
+                    onChange={(event) => setArea(event.target.value)}
+                    aria-label="Filter runners by area"
+                  >
+                    {areas.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
                 </div>
-              ))}
+
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>RANK</th>
+                        <th>RUNNER</th>
+                        <th>AREA</th>
+                        <th>TERRITORY</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRunners.map((runner) => (
+                        <tr key={runner.name}>
+                          <td>
+                            #{String(runners.indexOf(runner) + 1).padStart(2, "0")}
+                          </td>
+                          <td className="runner-name">
+                            {runner.name}
+                          </td>
+                          <td>{runner.area}</td>
+                          <td className="accent">
+                            {runner.territory.toFixed(2)} km²
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* MAP */}
+        <section className="section map-section" id="map">
+          <div className="container map-layout">
+            <div>
+              <div className="section-eyebrow">
+                EVERY BLOCK IS A BATTLEGROUND
+              </div>
+              <h2>
+                YOUR CITY.
+                <br />
+                <em>YOUR TERRITORY.</em>
+              </h2>
+              <p>
+                Explore Karachi, discover running routes,
+                and see where the competition is heating up.
+                Every closed loop is an opportunity to claim
+                new ground.
+              </p>
             </div>
 
-            <LeaderTable
-              area={area}
-              sort={sort}
-              setArea={setArea}
-              setSort={setSort}
-            />
-          </section>
-        )}
+            <div className="map-card">
+              <div className="map-card-top">
+                KARACHI / TERRITORY PREVIEW
+                <span>● DEMO VIEW</span>
+              </div>
 
-        {page === 'Competitions' && (
-          <section className="section container page-section">
-            <span className="eyebrow dot">
-              THE CITY CHALLENGES
-            </span>
+              <img
+                src="/Map%20.jpg"
+                alt="Karachi territory map preview"
+              />
 
-            <h1 className="page-title">
-              RACE FOR <span className="lime">GLORY.</span>
-            </h1>
+              <div className="map-overlay">
+                EXPLORE THE STREETS <Arrow />
+              </div>
+            </div>
+          </div>
+        </section>
 
-            <p className="section-intro">
-              Every competition is another chance to prove who
-              owns the streets. Competitions can only be joined
-              through the ILAQA mobile app.
+        {/* COMPETITIONS */}
+        <section
+          className="section competition-section"
+          id="competitions"
+        >
+          <div className="container">
+            <div className="section-eyebrow">
+              RIVALRY MAKES LEGENDS
+            </div>
+            <h2>
+              ENTER THE <em>ARENA.</em>
+            </h2>
+            <p className="section-description">
+              Challenge your limits, represent your neighbourhood,
+              and rise through the rankings.
             </p>
-
-            <div className="filters competition-filters">
-              {['All', 'Upcoming', 'Completed'].map((item) => (
-                <button
-                  key={item}
-                  className={
-                    competitionFilter === item ? 'active' : ''
-                  }
-                  onClick={() => setCompetitionFilter(item)}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
 
             <div className="competition-grid">
-              {competitions
-                .filter((competition) => {
-                  return (
-                    competitionFilter === 'All' ||
-                    competition.status === competitionFilter
-                  );
-                })
-                .map((competition, index) => (
-                  <article
-                    className="competition-card"
-                    key={competition.name}
-                  >
-                    <div className="competition-art">
-                      <span>
-                        {competition.type.toUpperCase()}
-                      </span>
-
-                      <span>
-                        {competition.status.toUpperCase()}
-                      </span>
-
-                      <Target
-                        size={95}
-                        strokeWidth={1.1}
-                      />
-
-                      <b>
-                        0{index + 1}
-                      </b>
-                    </div>
-
-                    <div className="competition-body">
-                      <span className="eyebrow">
-                        ◷ {competition.date.toUpperCase()}
-                      </span>
-
-                      <h3>
-                        {competition.name}
-                      </h3>
-
-                      <p>
-                        {competition.description}
-                      </p>
-
-                      <div className="competition-meta">
-                        <span>
-                          ♙ {competition.runners} RUNNERS
-                        </span>
-
-                        <span>
-                          {competition.status.toUpperCase()}
-                        </span>
-                      </div>
-
-                      <div className="view-only">
-                        VIEW ONLY · JOIN IN THE MOBILE APP
-                      </div>
-                    </div>
-                  </article>
-                ))}
+              {competitions.map((competition, index) => (
+                <article
+                  className="competition-card"
+                  key={competition.name}
+                >
+                  <div className="competition-number">
+                    0{index + 1} / {competition.type}
+                  </div>
+                  <h3>{competition.name}</h3>
+                  <p>{competition.description}</p>
+                  <div className="competition-meta">
+                    <span>{competition.date}</span>
+                    <span>{competition.runners} RUNNERS</span>
+                  </div>
+                </article>
+              ))}
             </div>
-          </section>
-        )}
+          </div>
+        </section>
 
-        {page === 'How It Works' && (
-          <section className="section container page-section">
-            <span className="eyebrow dot">
+        {/* HOW IT WORKS */}
+        <section className="section how-section" id="how-it-works">
+          <div className="container">
+            <div className="section-eyebrow">
               THE RULES OF THE STREETS
-            </span>
-
-            <h1 className="page-title">
-              HOW TO <span className="lime">PLAY.</span>
-            </h1>
-
-            <p className="section-intro">
-              Three simple moves. One city-wide game.
-            </p>
+            </div>
+            <h2>
+              HOW TO <em>PLAY.</em>
+            </h2>
 
             <div className="steps">
               {[
                 {
-                  n: '01',
-                  icon: <Footprints />,
-                  title: 'START YOUR RUN',
-                  text: 'Open the ILAQA mobile app and start tracking. Your phone records your running route privately.'
+                  number: "01",
+                  icon: "↗",
+                  title: "START YOUR RUN",
+                  text: "Open the ILAQA mobile app and start tracking your run.",
                 },
                 {
-                  n: '02',
-                  icon: <Route />,
-                  title: 'CLOSE THE LOOP',
-                  text: 'Run a real enclosed loop around a block or park. Our backend checks the route before accepting a claim.'
+                  number: "02",
+                  icon: "◎",
+                  title: "CLOSE THE LOOP",
+                  text: "Run a closed loop around a real-world block or park.",
                 },
                 {
-                  n: '03',
-                  icon: <Flag />,
-                  title: 'CLAIM YOUR ILAQA',
-                  text: 'Valid loops become territory polygons. Stay active to keep your three-day ownership shield.'
-                }
+                  number: "03",
+                  icon: "⚑",
+                  title: "CLAIM YOUR ILAQA",
+                  text: "A valid loop becomes claimed territory. Stay active to defend it.",
+                },
               ].map((step) => (
-                <div
-                  className="step"
-                  key={step.n}
-                >
-                  <span>
-                    {step.n}
-                  </span>
-
-                  <div className="step-icon">
-                    {step.icon}
-                  </div>
-
+                <article key={step.number}>
+                  <span>{step.number}</span>
+                  <div className="step-icon">{step.icon}</div>
                   <div>
-                    <h3>
-                      {step.title}
-                    </h3>
-
-                    <p>
-                      {step.text}
-                    </p>
+                    <h3>{step.title}</h3>
+                    <p>{step.text}</p>
                   </div>
-
-                  <ArrowUpRight className="lime" />
-                </div>
-              ))}
-            </div>
-
-            <div className="three-grid info-grid">
-              {[
-                {
-                  icon: <ShieldCheck />,
-                  title: 'FAIR PLAY, ALWAYS.',
-                  body: 'Suspicious GPS jumps, unrealistic speeds and step mismatches are checked to help keep competitions fair.'
-                },
-                {
-                  icon: <Lock />,
-                  title: 'YOUR LOCATION STAYS YOURS.',
-                  body: 'The public website never shows your live coordinates or raw running route.'
-                },
-                {
-                  icon: <Flame />,
-                  title: 'SHOW UP. STAY ON TOP.',
-                  body: 'Keep your territory shield active by returning regularly. Inactive territories can become vulnerable.'
-                }
-              ].map((card) => (
-                <article
-                  className="feature-card"
-                  key={card.title}
-                >
-                  <div className="lime">
-                    {card.icon}
-                  </div>
-
-                  <h3>
-                    {card.title}
-                  </h3>
-
-                  <p>
-                    {card.body}
-                  </p>
+                  <b>↗</b>
                 </article>
               ))}
             </div>
-
-            <div className="mini-cta">
-              <h2>
-                READY TO MAKE YOUR MARK?
-              </h2>
-
-              <button
-                className="btn black"
-                onClick={() => go('Explore Map')}
-              >
-                EXPLORE THE CITY
-                <ArrowUpRight size={18} />
-              </button>
-            </div>
-          </section>
-        )}
+          </div>
+        </section>
       </main>
 
       <footer className="footer">
-        <div className="container footer-grid">
-          <div>
-            <button
-             className="brand"
-             onClick={() => go('Home')}
-            >
-             <span className="brand-icon">
-               <img
-                 src="/ilaqa-logo.jpg"
-                 alt="ILAQA Logo"
-                className="logo-image"
-               />
-            </span>
-
-               ILAQA<span className="lime">.</span>
-            </button>
-
-
-            <p>
-              Turn your city into your playground.
-              <br />
-              Run the streets. Own your ILAQA.
-            </p>
-          </div>
-
-          <div>
-            <span className="eyebrow">
-              EXPLORE
-            </span>
-
-            {[
-              'Explore Map',
-              'Leaderboard',
-              'Competitions'
-            ].map((item) => (
-              <button
-                key={item}
-                onClick={() => go(item)}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-
-          <div>
-            <span className="eyebrow">
-              ILAQA
-            </span>
-
-            {[
-              'How It Works',
-              'Home'
-            ].map((item) => (
-              <button
-                key={item}
-                onClick={() => go(item)}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-
-          <div>
-            <span className="eyebrow dot">
-              MADE FOR THE STREETS
-            </span>
-
-            <h3>
-              EVERY BLOCK
-              <br />
-              IS UP FOR GRABS.
-            </h3>
-          </div>
-        </div>
-
-        <div className="container footer-bottom">
-          <span>
-            © 2026 ILAQA. FINAL YEAR PROJECT PREVIEW.
-          </span>
-
-          <span>
-            BUILT IN KARACHI ✳ MADE TO MOVE.
-          </span>
+        <div className="container footer-inner">
+          <strong>
+            ILAQA<span className="accent">.</span>
+          </strong>
+          <span>THE CITY IS YOUR PLAYGROUND.</span>
+          <span>© {new Date().getFullYear()} ILAQA</span>
         </div>
       </footer>
-    </>
+    </div>
   );
 }
