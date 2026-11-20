@@ -84,7 +84,12 @@ namespace ILAQA.Tests
             Assert.Null(polygon);
         }
         [Fact]
-        public void SelfIntersectingRoute_ShouldNotCreateTerritory()
+        // Crossing routes are allowed (approved decision, SRS FR-15 to be
+        // reworded): each enclosed lobe is judged on its own. This small
+        // bow-tie still gives no land, but only because its lobes are too
+        // small or too narrow - never because the route crossed itself.
+        // (FigureEight_ShouldClaimBothLobes shows big lobes being claimed.)
+        public void SmallSelfIntersectingRoute_LobesRejectedForSizeNotForCrossing()
         {
             var service = new TerritoryDetectionService(
                 new GpsDistanceService());
@@ -114,9 +119,12 @@ namespace ILAQA.Tests
             AccuracyMeters = 5, RecordedAt = start.AddSeconds(120) }
     };
 
-            var polygon = service.CreateTerritoryPolygon(points);
+            var analysis = service.AnalyzeRun(points);
 
-            Assert.Null(polygon);
+            Assert.Empty(analysis.Accepted);
+            Assert.All(analysis.Rejected, lobe => Assert.Contains(
+                lobe.RejectionReason,
+                new[] { TerritoryRejectionReasons.TooSmall, TerritoryRejectionReasons.TooNarrow }));
         }
         [Fact]
         public void TinyLoop_ShouldNotCreateTerritory()
