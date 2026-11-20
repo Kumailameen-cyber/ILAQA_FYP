@@ -431,7 +431,10 @@ public sealed class RunService(
                 TerritoryDetectionService.OwnerLabel(row.Owner, viewerUserId),
                 row.Owner.Id == viewerUserId,
                 TerritoryDetectionService.IsShielded(row.Territory, now),
-                RunTerritoryDto.ToLatLngs(row.Territory.Boundary)))
+                RunTerritoryDto.ToLatLngs(row.Territory.Boundary))
+            {
+                Holes = RunTerritoryDto.HolesOf(row.Territory.Boundary)
+            })
             .ToList();
     }
 

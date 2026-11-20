@@ -20,6 +20,9 @@ export type ConfirmedTerritory = {
   loopIndex?: number;
   areaSquareMeters: number;
   boundary: { latitude: number; longitude: number }[];
+  // Holes in the land (another runner's block inside it), one ring each.
+  // Only sent by the server when there are holes.
+  holes?: { latitude: number; longitude: number }[][];
   // From GET /api/runs/territories (map view).
   colorHex?: string;
   ownerLabel?: string;

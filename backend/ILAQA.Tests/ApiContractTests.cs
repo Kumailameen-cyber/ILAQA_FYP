@@ -145,4 +145,65 @@ public class ApiContractTests
         Assert.Equal(24.86, first.Latitude);
         Assert.Equal(67.0, first.Longitude);
     }
+
+    // #6: a territory with a hole (land around someone else's block) sends
+    // only its outer edge as Boundary and each hole separately, so the map
+    // can cut the hole out instead of drawing one tangled line.
+    private static NetTopologySuite.Geometries.Polygon SquareWithHole()
+    {
+        var f = new NetTopologySuite.Geometries.GeometryFactory();
+        var outer = f.CreateLinearRing(
+        [
+            new(67.00, 24.86), new(67.01, 24.86), new(67.01, 24.87), new(67.00, 24.87), new(67.00, 24.86)
+        ]);
+        var hole = f.CreateLinearRing(
+        [
+            new(67.004, 24.864), new(67.006, 24.864), new(67.006, 24.866), new(67.004, 24.866), new(67.004, 24.864)
+        ]);
+        return f.CreatePolygon(outer, [hole]);
+    }
+
+    [Fact]
+    public void TerritoryWithHole_BoundaryIsOuterEdgeOnly_HolesSentSeparately()
+    {
+        var dto = RunTerritoryDto.From(new ILAQA.Models.Territory
+        {
+            Id = Id, LoopIndex = 1, AreaSquareMeters = 2.5, Boundary = SquareWithHole()
+        });
+
+        Assert.Equal(5, dto.Boundary.Count);
+        Assert.Equal(24.86, dto.Boundary[0].Latitude);
+        var hole = Assert.Single(dto.Holes!);
+        Assert.Equal(5, hole.Count);
+        Assert.Equal(24.864, hole[0].Latitude);
+        Assert.Equal(67.004, hole[0].Longitude);
+        Assert.Contains("\"holes\":[[{\"latitude\":24.864", JsonSerializer.Serialize(dto, Web));
+    }
+
+    [Fact]
+    public void TerritoryWithoutHole_SendsNoHolesField()
+    {
+        var f = new NetTopologySuite.Geometries.GeometryFactory();
+        var dto = RunTerritoryDto.From(new ILAQA.Models.Territory
+        {
+            Id = Id, LoopIndex = 1, AreaSquareMeters = 2.5,
+            Boundary = f.CreatePolygon([new(67.0, 24.86), new(67.1, 24.86), new(67.1, 24.96), new(67.0, 24.86)])
+        });
+
+        Assert.Null(dto.Holes);
+        Assert.DoesNotContain("holes", JsonSerializer.Serialize(dto, Web));
+    }
+
+    [Fact]
+    public void MapTerritoryWithHole_SendsHoles()
+    {
+        var polygon = SquareWithHole();
+        var dto = new MapTerritoryDto(Id, 2.5, "#123456", "a", false, true, RunTerritoryDto.ToLatLngs(polygon))
+        {
+            Holes = RunTerritoryDto.HolesOf(polygon)
+        };
+
+        Assert.Equal(5, dto.Boundary.Count);
+        Assert.Single(dto.Holes!);
+    }
 }
