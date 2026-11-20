@@ -13,10 +13,17 @@ public sealed class ApiException(int statusCode, object? body = null)
     // Either an ErrorResponse (sent as JSON) or a plain string (sent as text).
     public object? Body { get; } = body;
 
+    // Sent as the Retry-After header (seconds) when set, e.g. on a 429.
+    public int? RetryAfterSeconds { get; init; }
+
     public static ApiException BadRequest(string message) => new(StatusCodes.Status400BadRequest, new ErrorResponse(message));
     public static ApiException Unauthorized(string message) => new(StatusCodes.Status401Unauthorized, new ErrorResponse(message));
     public static ApiException Conflict(string message) => new(StatusCodes.Status409Conflict, new ErrorResponse(message));
-    public static ApiException TooManyRequests(string message) => new(StatusCodes.Status429TooManyRequests, new ErrorResponse(message));
+    public static ApiException TooManyRequests(string message, TimeSpan? retryAfter = null) =>
+        new(StatusCodes.Status429TooManyRequests, new ErrorResponse(message))
+        {
+            RetryAfterSeconds = retryAfter is { } wait ? (int)Math.Ceiling(wait.TotalSeconds) : null
+        };
 
     // The runs API answers with plain text; the app matches some of these
     // texts (mobile/services/runSync.ts), so their wording must not change.

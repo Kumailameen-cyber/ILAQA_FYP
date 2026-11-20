@@ -21,6 +21,9 @@ public sealed class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> logge
             return false; // Let the default handler write a 500 problem response.
         }
 
+        if (apiError.RetryAfterSeconds is { } seconds)
+            httpContext.Response.Headers.RetryAfter = seconds.ToString();
+
         // ObjectResult uses the same formatters as a controller would:
         // records become JSON, strings become text/plain.
         var result = new ObjectResult(apiError.Body) { StatusCode = apiError.StatusCode };

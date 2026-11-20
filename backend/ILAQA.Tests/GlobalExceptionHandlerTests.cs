@@ -58,6 +58,25 @@ public class GlobalExceptionHandlerTests
     }
 
     [Fact]
+    public async Task TooManyRequests_ShouldSendRetryAfterHeader()
+    {
+        var (_, context, body) = await Handle(
+            ApiException.TooManyRequests("Too many login attempts for this account.", TimeSpan.FromSeconds(37)));
+
+        Assert.Equal(429, context.Response.StatusCode);
+        Assert.Equal("37", context.Response.Headers.RetryAfter.ToString());
+        Assert.Equal("{\"message\":\"Too many login attempts for this account.\"}", body);
+    }
+
+    [Fact]
+    public async Task ErrorWithoutRetryAfter_ShouldNotSendTheHeader()
+    {
+        var (_, context, _) = await Handle(ApiException.Conflict("c"));
+
+        Assert.False(context.Response.Headers.ContainsKey("Retry-After"));
+    }
+
+    [Fact]
     public async Task UnexpectedError_ShouldBeLeftToTheDefault500Handler()
     {
         var (handled, _, _) = await Handle(new InvalidOperationException("boom"));

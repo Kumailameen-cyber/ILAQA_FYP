@@ -1,4 +1,5 @@
 using ILAQA.Common;
+using ILAQA.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -10,7 +11,7 @@ namespace ILAQA.Features.Auth;
 [ApiController]
 [Route("api/auth")]
 [EnableRateLimiting("auth")]
-public sealed class AuthController(AuthService auth) : ControllerBase
+public sealed class AuthController(AuthService auth, LoginAttemptLimit loginLimit) : ControllerBase
 {
     // Sign up: save a pending registration and email a code.
     [HttpPost("register")]
@@ -29,9 +30,18 @@ public sealed class AuthController(AuthService auth) : ControllerBase
         await auth.ResendEmailOtpAsync(request);
 
     // Sign in with email or username; returns access + refresh tokens.
+    // At most 10 attempts a minute per account (NFR-05), as well as the
+    // per-IP "auth" limit.
     [HttpPost("login")]
-    public async Task<LoginResponse> Login(LoginRequest request) =>
-        await auth.LoginAsync(request);
+    public async Task<LoginResponse> Login(LoginRequest request)
+    {
+        if (!loginLimit.TryAcquire(request.EmailOrUsername, out var retryAfter))
+            throw ApiException.TooManyRequests(
+                "Too many login attempts for this account. Please wait a minute and try again.",
+                retryAfter);
+
+        return await auth.LoginAsync(request);
+    }
 
     // Exchange a refresh token for new tokens.
     [HttpPost("refresh")]

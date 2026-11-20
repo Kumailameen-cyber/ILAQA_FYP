@@ -114,6 +114,9 @@ builder.Services.AddScoped<EmailService>();
 builder.Services.AddScoped<GpsDistanceService>();
 builder.Services.AddScoped<TerritoryDetectionService>();
 builder.Services.AddScoped<TerritoryClaimService>();
+builder.Services.AddSingleton(new LoginAttemptLimit(
+    config.GetValue("RateLimiting:LoginAttemptsPerMinute", LoginAttemptLimit.DefaultAttemptsPerMinute),
+    TimeSpan.FromMinutes(1)));
 builder.Services.AddHttpClient<SupabaseStorageService>();
 builder.Services.AddHttpClient<GoogleRoadsService>(client => client.Timeout = TimeSpan.FromSeconds(5))
     .RemoveAllLoggers(); // The request URL contains the Google key: never log it.
@@ -197,6 +200,9 @@ if (app.Environment.IsDevelopment())
 }
 else
 {
+    // HSTS (NFR-02): browsers remember to use HTTPS only for this API.
+    // Not in Development, where the phone talks to the PC over plain HTTP.
+    app.UseHsts();
     app.UseHttpsRedirection();
 }
 
