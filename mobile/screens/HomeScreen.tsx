@@ -10,6 +10,7 @@ import { Ionicons } from '@expo/vector-icons';
 import RunMap from '../components/RunMap';
 import RunPanel from '../components/RunPanel';
 import { useMapTerritories } from '../hooks/useMapTerritories';
+import { useNewLand } from '../hooks/useNewLand';
 import { useRunTracking } from '../hooks/useRunTracking';
 
 type HomeScreenProps = {
@@ -23,7 +24,9 @@ export default function HomeScreen({
   displayName,
   onLogout,
 }: HomeScreenProps) {
-  const { savedTerritories, refreshTerritories } = useMapTerritories(runnerId);
+  const { savedTerritories, loaded, refreshTerritories } =
+    useMapTerritories(runnerId);
+  const newLand = useNewLand(savedTerritories, loaded);
   const run = useRunTracking({ runnerId, refreshTerritories, onLogout });
 
   return (
@@ -55,6 +58,8 @@ export default function HomeScreen({
         territories={savedTerritories}
         loading={run.loading}
         onRecenter={run.recenterMap}
+        highlightIds={newLand.highlightIds}
+        claimMessage={newLand.message}
       />
 
       <RunPanel

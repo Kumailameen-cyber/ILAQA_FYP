@@ -11,6 +11,9 @@ const REFRESH_INTERVAL_MS = 10000;
 export function useMapTerritories(runnerId: string) {
   const [savedTerritories, setSavedTerritories] =
     useState<ConfirmedTerritory[]>([]);
+  // False until the first successful load for this runner, so callers can
+  // tell "no land yet" apart from "not loaded yet".
+  const [loaded, setLoaded] = useState(false);
 
   // Points at the current effect's loader (a no-op after unmount).
   const refreshRef = useRef<() => void>(() => {});
@@ -18,6 +21,7 @@ export function useMapTerritories(runnerId: string) {
   useEffect(() => {
     let mounted = true;
     let fetching = false;
+    setLoaded(false);
 
     const loadSavedTerritories = async () => {
       if (fetching) return;
@@ -28,6 +32,7 @@ export function useMapTerritories(runnerId: string) {
 
         if (mounted) {
           setSavedTerritories(territories);
+          setLoaded(true);
           console.log('ILAQA MAP TERRITORIES:', territories.length);
         }
       } catch (error) {
@@ -62,5 +67,5 @@ export function useMapTerritories(runnerId: string) {
   // Reload now, e.g. after a sync claimed new land. Stable between renders.
   const refreshTerritories = useCallback(() => refreshRef.current(), []);
 
-  return { savedTerritories, refreshTerritories };
+  return { savedTerritories, loaded, refreshTerritories };
 }

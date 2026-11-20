@@ -1,5 +1,6 @@
 // Home map: the runner's position, the current run's route line, every
-// runner's territories, the recenter button and the "finding location" banner.
+// runner's territories, the recenter button, the "finding location" banner
+// and the "Territory claimed" message when a live claim appears.
 
 import { memo, RefObject } from 'react';
 import {
@@ -21,6 +22,7 @@ import MapView, {
   LatLng,
 } from 'react-native-maps';
 import { ConfirmedTerritory } from '../services/runStorage';
+import { ILAQA_MAP_STYLE } from '../theme/mapStyle';
 
 const KARACHI_REGION: Region = {
   latitude: 24.8607,
@@ -55,6 +57,10 @@ type RunMapProps = {
   territories: ConfirmedTerritory[];
   loading: boolean;
   onRecenter: () => void;
+  // Newly claimed land, drawn brighter for a few seconds.
+  highlightIds: string[];
+  // "Territory claimed · +N m²", or null when nothing is shown.
+  claimMessage: string | null;
 };
 
 // memo: the run timer re-renders the Home screen every second; the map only
@@ -66,6 +72,8 @@ function RunMap({
   territories,
   loading,
   onRecenter,
+  highlightIds,
+  claimMessage,
 }: RunMapProps) {
   return (
     <View style={styles.mapContainer}>
@@ -74,6 +82,11 @@ function RunMap({
         style={styles.map}
         provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
         initialRegion={KARACHI_REGION}
+        customMapStyle={ILAQA_MAP_STYLE}
+        userInterfaceStyle="dark"
+        showsBuildings={false}
+        showsIndoors={false}
+        toolbarEnabled={false}
         showsUserLocation={location !== null}
         showsMyLocationButton={false}
         showsCompass
@@ -107,15 +120,18 @@ function RunMap({
         {territories.map((territory) => {
           // Each runner has their own colour; fall back to ILAQA lime.
           const color = territory.colorHex ?? '#C6FF35';
+          const isNew = highlightIds.includes(territory.territoryId);
           return (
             <Polygon
-              // The key changes with the shape, so a merged or reduced territory
-              // is redrawn (Android maps do not always redraw changed points).
-              key={`saved-${territory.territoryId}-${territory.boundary.length}-${territory.areaSquareMeters}`}
+              // The key changes with the shape (and the highlight), so a
+              // merged or reduced territory is redrawn (Android maps do not
+              // always redraw changed points or colours).
+              key={`saved-${territory.territoryId}-${territory.boundary.length}-${territory.holes?.length ?? 0}-${territory.areaSquareMeters}-${isNew ? 'new' : 'old'}`}
               coordinates={territory.boundary}
-              fillColor={withAlpha(color, 0.35)}
+              holes={territory.holes}
+              fillColor={withAlpha(color, isNew ? 0.6 : 0.35)}
               strokeColor={color}
-              strokeWidth={3}
+              strokeWidth={isNew ? 5 : 3}
               tappable
               onPress={() => showTerritoryDetails(territory)}
             />
@@ -130,6 +146,17 @@ function RunMap({
       >
         <Ionicons name="locate" size={24} color="#C6FF35" />
       </TouchableOpacity>
+
+      {claimMessage && (
+        <View
+          style={styles.claimBanner}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+        >
+          <Ionicons name="flag" size={18} color="#C6FF35" />
+          <Text style={styles.claimText}>{claimMessage}</Text>
+        </View>
+      )}
 
       {loading && (
         <View style={styles.loadingOverlay}>
@@ -182,6 +209,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#0C0D0C',
     borderRadius: 12,
     padding: 16,
+  },
+  claimBanner: {
+    position: 'absolute',
+    top: 16,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#0C0D0C',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#C6FF35',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  claimText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
   },
   loadingText: {
     color: '#FFFFFF',
