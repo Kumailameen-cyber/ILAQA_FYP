@@ -3,6 +3,7 @@ using System.Threading.RateLimiting;
 using ILAQA.Common;
 using ILAQA.Data;
 using ILAQA.Features.Auth;
+using ILAQA.Features.Leaderboard;
 using ILAQA.Features.Runner;
 using ILAQA.Features.Runs;
 using ILAQA.Models;
@@ -105,6 +106,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<RunnerService>();
 builder.Services.AddScoped<RunService>();
+builder.Services.AddScoped<LeaderboardService>();
 
 // ---------- Shared services ----------
 

@@ -1,5 +1,5 @@
 // App root: restores the login session and switches between the auth
-// screens and the signed-in tabs (Home map, Profile).
+// screens and the signed-in tabs (Home map, Ranks, Profile).
 
 import './services/backgroundLocationTask';
 import { useEffect, useState } from 'react';
@@ -19,6 +19,7 @@ import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
 import VerifyResetOtpScreen from './screens/VerifyResetOtpScreen';
 import NewPasswordScreen from './screens/NewPasswordScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import RanksScreen from './screens/RanksScreen';
 import BottomTabBar, { MainTab } from './components/BottomTabBar';
 import {
   Runner,
@@ -126,6 +127,8 @@ export default function App() {
               displayName={runner.displayName}
               onLogout={handleLogout}
             />
+          ) : activeTab === 'ranks' ? (
+            <RanksScreen />
           ) : activeTab === 'profile' ? (
             <ProfileScreen
               onDisplayNameUpdated={(newName) => {
