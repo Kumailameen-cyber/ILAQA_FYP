@@ -42,6 +42,18 @@ public class LeaderboardTests
         Assert.False(LeaderboardRules.TryParseMetric("1", out _));
     }
 
+    [Theory]
+    [InlineData("area1")]
+    [InlineData("a-b")]
+    [InlineData("area,distance")]
+    [InlineData("-1")]
+    [InlineData("99999999999")]
+    [InlineData("area;drop")]
+    public void MetricText_ThatIsNotOneWord_IsRefused(string text)
+    {
+        Assert.False(LeaderboardRules.TryParseMetric(text, out _));
+    }
+
     [Fact]
     public void RunnersAreRankedByTheChosenMetric_HighestFirst()
     {
@@ -65,6 +77,19 @@ public class LeaderboardTests
         var ranked = LeaderboardRules.Rank(totals, LeaderboardMetric.Territories);
 
         Assert.Equal(new[] { 1, 2, 2, 4 }, ranked.Select(r => r.Rank));
+    }
+
+    [Fact]
+    public void EqualValues_AreListedByUserId_WhateverOrderTheyArriveIn()
+    {
+        var arrivedOneWay = new[] { Totals("d", area: 400), Totals("a", area: 400), Totals("b", area: 400) };
+        var arrivedTheOther = arrivedOneWay.Reverse().ToArray();
+
+        var first = LeaderboardRules.Rank(arrivedOneWay, LeaderboardMetric.Area);
+        var second = LeaderboardRules.Rank(arrivedTheOther, LeaderboardMetric.Area);
+
+        Assert.Equal(new[] { "a", "b", "d" }, first.Select(r => r.Totals.UserId));
+        Assert.Equal(new[] { "a", "b", "d" }, second.Select(r => r.Totals.UserId));
     }
 
     [Fact]
@@ -113,6 +138,17 @@ public class LeaderboardTests
     }
 
     [Fact]
+    public void RunnerWithNoUserRecord_IsShownAsAnonymous_NotAsTheUserId()
+    {
+        var totals = new[] { Totals("ghost-id-123", area: 700), Totals("a", area: 100) };
+
+        var board = LeaderboardRules.BuildBoard(totals, Users, LeaderboardMetric.Area, "a", 50);
+
+        Assert.Equal("Anonymous profile", board.Entries[0].Name);
+        Assert.DoesNotContain("ghost-id-123", board.Entries[0].Name);
+    }
+
+    [Fact]
     public void Values_AreRoundedForDisplay()
     {
         var board = LeaderboardRules.BuildBoard(
@@ -128,6 +164,12 @@ public class LeaderboardTests
         Assert.Equal(1, LeaderboardRules.ClampLimit(0));
         Assert.Equal(100, LeaderboardRules.ClampLimit(5000));
         Assert.Equal(20, LeaderboardRules.ClampLimit(20));
+    }
+
+    [Fact]
+    public void NegativeLimit_IsRaisedToOne()
+    {
+        Assert.Equal(1, LeaderboardRules.ClampLimit(-5));
     }
 
     [Fact]

@@ -38,3 +38,17 @@ test('a missing rank shows a dash', () => {
   assert.equal(formatRank(undefined), '—');
   assert.equal(formatRank(3), '#3');
 });
+
+test('a value that is not a finite, non-negative number shows a dash', () => {
+  for (const metric of ['area', 'distance', 'territories'] as const) {
+    assert.equal(formatRankValue(metric, NaN), '—');
+    assert.equal(formatRankValue(metric, Infinity), '—');
+    assert.equal(formatRankValue(metric, -5), '—');
+  }
+});
+
+test('a rank that is not finite or is negative shows a dash', () => {
+  assert.equal(formatRank(NaN), '—');
+  assert.equal(formatRank(Infinity), '—');
+  assert.equal(formatRank(-2), '—');
+});

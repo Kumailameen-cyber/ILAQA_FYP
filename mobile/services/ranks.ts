@@ -36,7 +36,13 @@ function withCommas(value: number): string {
   return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+// The server never sends these, but the screen shows a dash rather than "NaN".
+function isShowable(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
 export function formatRankValue(metric: RankMetric, value: number): string {
+  if (!isShowable(value)) return '—';
   if (metric === 'territories') return String(Math.round(value));
   if (metric === 'distance') {
     return value < 1000 ? `${Math.round(value)} m` : `${(value / 1000).toFixed(2)} km`;
@@ -54,5 +60,5 @@ export function formatActiveTime(seconds: number): string {
 }
 
 export function formatRank(rank: number | null | undefined): string {
-  return rank == null ? '—' : `#${rank}`;
+  return rank == null || !isShowable(rank) ? '—' : `#${rank}`;
 }
