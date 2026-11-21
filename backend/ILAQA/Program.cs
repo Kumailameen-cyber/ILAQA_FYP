@@ -135,6 +135,10 @@ builder.Services.AddHostedService<TerritoryInactivityService>();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// ---------- Real client address behind Azure's ingress ----------
+
+builder.Services.Configure<ForwardedHeadersOptions>(ForwardedHeadersSetup.Configure);
+
 // ---------- Rate limits ----------
 
 builder.Services.AddRateLimiter(options =>
@@ -219,6 +223,10 @@ builder.Services.AddSwaggerGen(options =>
 // ---------- HTTP pipeline ----------
 
 var app = builder.Build();
+
+// First, so everything after it (HTTPS redirection, HSTS, rate limits) sees
+// the real client address and scheme.
+app.UseForwardedHeaders();
 
 app.UseExceptionHandler();
 
