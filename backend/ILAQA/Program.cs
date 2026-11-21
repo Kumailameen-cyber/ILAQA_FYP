@@ -4,6 +4,7 @@ using ILAQA.Common;
 using ILAQA.Data;
 using ILAQA.Features.Auth;
 using ILAQA.Features.Leaderboard;
+using ILAQA.Features.Public;
 using ILAQA.Features.Runner;
 using ILAQA.Features.Runs;
 using ILAQA.Models;
@@ -107,6 +108,8 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<RunnerService>();
 builder.Services.AddScoped<RunService>();
 builder.Services.AddScoped<LeaderboardService>();
+builder.Services.AddScoped<PublicService>();
+builder.Services.AddMemoryCache(); // short cache for the public guest endpoints
 
 // ---------- Shared services ----------
 
@@ -150,6 +153,20 @@ builder.Services.AddRateLimiter(options =>
                 AutoReplenishment = true
             }));
 
+    // Public guest endpoints, per IP address.
+    var publicRequestsPerMinute = config.GetValue(
+        "RateLimiting:PublicRequestsPerMinute", PublicRules.DefaultRequestsPerMinute);
+    options.AddPolicy(PublicRules.RateLimitPolicy, context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = publicRequestsPerMinute,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
     // GPS uploads, per signed-in runner (NFR-05).
     var gpsUploadsPerMinute = config.GetValue(
         "RateLimiting:GpsUploadsPerMinute", GpsUploadRateLimit.DefaultUploadsPerMinute);
@@ -168,8 +185,19 @@ builder.Services.AddRateLimiter(options =>
 
 // ---------- Controllers, CORS and Swagger ----------
 
+// Production: only the guest website origins from config
+// (Cors:GuestWebsiteOrigins), GET only. Nothing configured = no origin allowed.
+var guestWebsiteOrigins = PublicRules.CleanOrigins(config.GetSection("Cors:GuestWebsiteOrigins").Get<string[]>());
 builder.Services.AddCors(options =>
-    options.AddPolicy("DevelopmentCors", policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+{
+    options.AddPolicy("DevelopmentCors", policy => policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+    options.AddPolicy(PublicRules.CorsPolicy, policy =>
+    {
+        if (guestWebsiteOrigins.Length > 0)
+            policy.WithOrigins(guestWebsiteOrigins);
+        policy.WithMethods("GET");
+    });
+});
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -206,6 +234,7 @@ else
     // Not in Development, where the phone talks to the PC over plain HTTP.
     app.UseHsts();
     app.UseHttpsRedirection();
+    app.UseCors(PublicRules.CorsPolicy);
 }
 
 // Authentication runs before the rate limiter, so the GPS upload limit
